@@ -25,7 +25,8 @@ object Main {
       |common options :
       |  --out <path>              output file (default : measurements.csv / composite.png)
       |  --cache <dir>             where decoded RAW files are kept (default : .eclipse-cache)
-      |  --observer <lat,lon[,alt]> observer position, when the frames carry no GPS data
+      |  --observer <lat,lon[,alt]> observer position, needed only when NO frame carries a fix :
+      |                            a single fix in the whole session places all the others
       |  --parallelism <n>         number of frames analyzed at once (default : 2)
       |  --pressure <hPa>          atmospheric pressure, for the refraction (default : 1010)
       |  --temperature <°C>        temperature, for the refraction (default : 15)
@@ -76,18 +77,21 @@ object Main {
       inputs <- imageInputs(options)
       _      <- Either.cond(inputs.nonEmpty, (), "no image found")
     } yield {
-      val started        = System.currentTimeMillis()
-      val (frames, scale) = FrameAnalyzer.analyzeAll(
+      val started  = System.currentTimeMillis()
+      val session  = FrameAnalyzer.analyzeAll(
         inputs,
         analysisConfig(options),
         (done, total, frame) => Console.err.println(f"[$done%4d/$total%4d] ${frame.name} ${describe(frame)}")
       )
-      val output         = options.path("out").getOrElse(Paths.get("measurements.csv"))
-      FrameStore.save(output, frames)
-      val elapsed        = Duration.ofMillis(System.currentTimeMillis() - started)
+      val output   = options.path("out").getOrElse(Paths.get("measurements.csv"))
+      FrameStore.save(output, session.frames)
+      val elapsed  = Duration.ofMillis(System.currentTimeMillis() - started)
       List(
-        EclipseComposer.summary(frames),
-        scale.map(value => f"plate scale (fitted)  : ${value.pixelsPerDegree}%.1f px/°").getOrElse(""),
+        EclipseComposer.summary(session.frames),
+        s"position              : ${session.location.describe}",
+        if (session.location.looksMoved()) f"warning               : the fixes are spread over ${session.location.spreadMeters}%.0f m, was the camera moved ?" else "",
+        session.anchor.map(frame => s"analysis started from : ${frame.name}").getOrElse(""),
+        session.plateScale.map(value => f"plate scale (fitted)  : ${value.pixelsPerDegree}%.1f px/°").getOrElse(""),
         "",
         s"measurements written to $output (${elapsed.toMinutes} min ${elapsed.toSecondsPart} s)"
       ).filter(_.nonEmpty).mkString("\n")
@@ -242,7 +246,10 @@ object Main {
   private def loadFrames(options: Options): Either[String, List[FrameAnalysis]] =
     options.inputs match {
       case single :: Nil if single.toString.endsWith(".csv") =>
-        FrameStore.load(single, options.observer)
+        FrameStore.loadSession(single, options.observer).map { case (frames, consolidation) =>
+          Console.err.println(s"position  : ${consolidation.describe}")
+          frames
+        }
       case _                                                 =>
         imageInputs(options).map { inputs =>
           FrameAnalyzer
@@ -251,7 +258,7 @@ object Main {
               analysisConfig(options),
               (done, total, frame) => Console.err.println(f"[$done%4d/$total%4d] ${frame.name} ${describe(frame)}")
             )
-            ._1
+            .frames
         }
     }
 

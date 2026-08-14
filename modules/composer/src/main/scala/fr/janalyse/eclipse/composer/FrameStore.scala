@@ -91,16 +91,41 @@ object FrameStore {
     observer: Option[GeoPoint] = None,
     conditions: AtmosphericConditions = AtmosphericConditions()
   ): Either[String, List[FrameAnalysis]] =
+    loadSession(path, observer, conditions).map(_._1)
+
+  /** Reads the measurements back, and says what it made of the observing position.
+    *
+    * The frames which carry no position - the GPS had not locked yet, the fix was dropped - inherit
+    * the one consolidated over the whole session : they stay usable instead of being left aside.
+    */
+  def loadSession(
+    path: Path,
+    observer: Option[GeoPoint] = None,
+    conditions: AtmosphericConditions = AtmosphericConditions()
+  ): Either[String, (List[FrameAnalysis], SessionLocation.Consolidation)] =
     Try {
       val lines = Files.readAllLines(path, StandardCharsets.UTF_8).asScala.toList
       lines match {
         case Nil            => Left(s"empty measurements file : $path")
         case _ :: dataLines =>
-          Right(dataLines.filter(_.trim.nonEmpty).map(line => fromCsvLine(line, observer, conditions)))
+          val parsed        = dataLines.filter(_.trim.nonEmpty).map(fromCsvLine)
+          val consolidation = SessionLocation.consolidate(parsed.map(_.metadata), observer)
+          val frames        = parsed.map { record =>
+            val location = consolidation.location.orElse(record.metadata.location)
+            val metadata = record.metadata.copy(location = location)
+            val sun      = for {
+              shotAt   <- metadata.shotAt
+              position <- location
+            } yield SolarEphemeris.position(shotAt.toInstant, position, conditions)
+            FrameAnalysis(record.path, metadata, sun, record.disc, record.issues)
+          }
+          Right((frames, consolidation))
       }
     }.toEither.left.map(error => s"unable to read $path : ${error.getMessage}").flatten
 
-  private def fromCsvLine(line: String, observer: Option[GeoPoint], conditions: AtmosphericConditions): FrameAnalysis = {
+  private final case class Record(path: Path, metadata: ShotMetadata, disc: Option[MeasuredDisc], issues: List[String])
+
+  private def fromCsvLine(line: String): Record = {
     val columns  = split(line)
     def at(index: Int): Option[String] = columns.lift(index).map(_.trim).filter(_.nonEmpty)
     def number(index: Int): Option[Double] = at(index).flatMap(value => Try(value.toDouble).toOption)
@@ -112,7 +137,7 @@ object FrameStore {
 
     val metadata = ShotMetadata(
       shotAt = at(1).flatMap(value => Try(OffsetDateTime.parse(value)).toOption),
-      location = location.orElse(observer),
+      location = location,
       cameraName = at(5),
       lensName = at(6),
       focalLengthMillimeters = number(7),
@@ -140,15 +165,9 @@ object FrameStore {
       roomFactor = number(22)
     )
 
-    val sun = for {
-      shotAt   <- metadata.shotAt
-      position <- metadata.location
-    } yield SolarEphemeris.position(shotAt.toInstant, position, conditions)
-
-    FrameAnalysis(
+    Record(
       path = Paths.get(at(0).getOrElse("")),
       metadata = metadata,
-      sun = sun,
       disc = disc,
       issues = at(23).map(_.split(""" \| """).toList).getOrElse(Nil)
     )

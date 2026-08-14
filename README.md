@@ -88,10 +88,18 @@ sbt "cli/run plan measurements.csv"
 sbt "cli/run compose measurements.csv --annotate --out composite.png"
 ```
 
-Aucun réglage n'est nécessaire : tout est déduit des mesures (voir plus bas). `--observer`
-n'est utile que si les EXIF ne portent pas de GPS ; sinon la position est lue photo par
-photo. Les extensions sont insensibles à la casse : `.CR3`, `.cr3`, `.Cr3` sont traités de
-la même façon, comme `.JPG` ou `.PNG`.
+Aucun réglage n'est nécessaire : tout est déduit des mesures (voir plus bas). Les extensions
+sont insensibles à la casse : `.CR3`, `.cr3`, `.Cr3` sont traités de la même façon, comme
+`.JPG` ou `.PNG`.
+
+**Le GPS manquant n'est pas un problème.** Toutes les photos viennent du même endroit, donc
+une seule position est consolidée pour toute la séance : c'est la **médiane des relevés
+disponibles**, et elle sert à toutes les photos. Une seule photo géolocalisée suffit donc à
+placer les 300 autres ; et comme c'est une médiane, un relevé aberrant ne déplace rien, la
+gigue habituelle du récepteur est lissée, et la trajectoire calculée ne tremble plus.
+L'écart maximal entre les relevés est rapporté — s'il dépasse 200 m, c'est signalé, car
+l'hypothèse « même endroit » devient douteuse. `--observer` ne sert que si **aucune** photo
+ne porte de position.
 
 ## Les réglages trouvés tout seuls
 
@@ -118,6 +126,7 @@ automatic : composite will be about 20200 x 5600 px for a 41.2° x 11.4° field
 | rayon imposé au recalage | issu de l'échelle, ou de l'optique (focale + pas des photosites lus dans l'EXIF) avant même d'avoir regardé une image |
 | point de départ de l'analyse | une vue de totalité, repérée à l'exposition |
 | identification des vues sans filtre | par l'IL EXIF, comparé à la médiane de la séance |
+| position de l'observateur | médiane des relevés GPS de la séance, appliquée à toutes les photos, y compris celles qui n'en ont pas |
 | dominante, luminosité, niveau de ciel | mesurés sur chaque photo |
 
 Toute option donnée explicitement l'emporte sur la valeur trouvée ; `--no-auto` revient aux
@@ -252,7 +261,7 @@ séquence.
   en cache (`.eclipse-cache`).
 
 ```bash
-sbt test        # 49 tests
+sbt test        # 58 tests
 sbt cli/run     # aide en ligne
 
 # une session d'exemple, pour essayer sans sortir les RAW

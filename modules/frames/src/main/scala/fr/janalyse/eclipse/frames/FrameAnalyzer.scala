@@ -19,8 +19,15 @@ final case class FrameAnalysisConfig(
   rawDecode: RawDecoder.RawDecodeConfig = RawDecoder.RawDecodeConfig(),
   detector: DiscDetectorConfig = DiscDetectorConfig(),
   atmosphere: AtmosphericConditions = AtmosphericConditions(),
-  /** used when the frames carry no GPS position */
+  /** position to use for the frames that carry no GPS fix, and for the whole session when
+    * `consolidateLocation` is on
+    */
   observer: Option[GeoPoint] = None,
+  /** every frame of a session comes from the same place : one position is consolidated over the
+    * whole session and used for all of them, which fills the frames without a fix and irons out
+    * the GPS wandering
+    */
+  consolidateLocation: Boolean = true,
   /** when known, the expected disc radius is enforced during the fit */
   plateScale: Option[PlateScale] = None,
   /** below that radius in the analysis copy, the analysis is redone on a larger one */
@@ -35,6 +42,20 @@ final case class FrameAnalysisConfig(
   unfilteredExposureDrop: Double = 2.5d,
   parallelism: Int = 2
 )
+
+/** What a whole session gave : the measured frames, and what was worked out about the session
+  * itself along the way.
+  *
+  * @param anchorIndex where the analysis started from, in the chronological order of the frames
+  */
+final case class SessionAnalysis(
+  frames: List[FrameAnalysis],
+  plateScale: Option[PlateScale],
+  location: SessionLocation.Consolidation,
+  anchorIndex: Int
+) {
+  def anchor: Option[FrameAnalysis] = frames.lift(anchorIndex)
+}
 
 /** Turns image files into measured frames : metadata, sun position, solar disc, obscuration.
   *
@@ -57,7 +78,11 @@ object FrameAnalyzer {
       case Left(error)  => issues += error; ShotMetadata.empty
     }
 
-    val location = metadata.location.orElse(config.observer)
+    // the session position, when there is one, is preferred over the fix of this very frame : the
+    // camera did not move, so the consolidated position is the more trustworthy of the two
+    val location =
+      if (config.consolidateLocation) config.observer.orElse(metadata.location)
+      else metadata.location.orElse(config.observer)
     if (location.isEmpty) issues += "no GPS position, neither in the metadata nor in the configuration"
     if (metadata.shotAt.isEmpty) issues += "no shooting date found in the metadata"
 
@@ -86,7 +111,8 @@ object FrameAnalyzer {
     // automatic tuning needs them to know how much room there is around the sun in each frame
     val withDimensions = metadata.copy(
       imageWidth = metadata.imageWidth.orElse(dimensions.map(_._1)),
-      imageHeight = metadata.imageHeight.orElse(dimensions.map(_._2))
+      imageHeight = metadata.imageHeight.orElse(dimensions.map(_._2)),
+      location = location
     )
 
     FrameAnalysis(path = path, metadata = withDimensions, sun = sun, disc = disc, issues = issues.result())
@@ -112,29 +138,36 @@ object FrameAnalyzer {
     paths: Seq[Path],
     config: FrameAnalysisConfig = FrameAnalysisConfig(),
     onProgress: (Int, Int, FrameAnalysis) => Unit = (_, _, _) => ()
-  ): (List[FrameAnalysis], Option[PlateScale]) = {
+  ): SessionAnalysis = {
     Files.createDirectories(config.cacheDirectory)
-    if (paths.isEmpty) (Nil, None)
+    if (paths.isEmpty) SessionAnalysis(Nil, None, SessionLocation.consolidate(Nil, config.observer), 0)
     else {
       val metadata    = readAllMetadata(paths, config)
       val ordered     = metadata.sortBy { case (_, found) => found.shotAt.map(_.toInstant.toEpochMilli).getOrElse(0L) }
       val anchorIndex = anchorOf(ordered.map(_._2), config)
       val seedScale   = config.plateScale.orElse(ordered.flatMap(_._2.opticalPlateScale).headOption)
 
-      val prefetcher = startPrefetching(ordered.map(_._1), anchorIndex, config)
+      // one position for the whole session : the frames without a fix are no longer lost, and the
+      // ones with a fix stop wandering by a few meters from one shot to the next
+      val consolidation = SessionLocation.consolidate(ordered.map(_._2), config.observer)
+      val located       =
+        if (config.consolidateLocation) config.copy(observer = consolidation.location)
+        else config
+
+      val prefetcher = startPrefetching(ordered.map(_._1), anchorIndex, located)
       val firstPass  =
-        try walkFromAnchor(ordered.map(_._1), anchorIndex, seedScale, config, onProgress)
+        try walkFromAnchor(ordered.map(_._1), anchorIndex, seedScale, located, onProgress)
         finally prefetcher.shutdownNow()
 
-      val measured   = withExposurePhases(firstPass.toList, config)
-      val plateScale = config.plateScale.orElse(estimatePlateScale(measured)).orElse(seedScale)
+      val measured   = withExposurePhases(firstPass.toList, located)
+      val plateScale = located.plateScale.orElse(estimatePlateScale(measured)).orElse(seedScale)
 
-      plateScale match {
-        case None        => (measured, None)
+      val frames = plateScale match {
+        case None        => measured
         case Some(scale) =>
           // one last look at the frames whose fit stayed doubtful, this time with the plate scale
           // of the session and with the neighbours already measured
-          val refinedConfig = config.copy(plateScale = Some(scale))
+          val refinedConfig = located.copy(plateScale = Some(scale))
           val refined       = measured.zipWithIndex.map { case (frame, index) =>
             if (!needsRefinement(frame, scale)) frame
             else {
@@ -143,8 +176,10 @@ object FrameAnalyzer {
               if (again.disc.isDefined) again else frame
             }
           }
-          (withExposurePhases(refined, config), plateScale)
+          withExposurePhases(refined, located)
       }
+
+      SessionAnalysis(frames, plateScale, consolidation, anchorIndex)
     }
   }
 

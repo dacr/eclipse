@@ -129,6 +129,41 @@ class ComposerTest extends munit.FunSuite {
     } finally Files.deleteIfExists(file)
   }
 
+  test("frames without any GPS fix inherit the position of the session") {
+    // the receiver had not locked yet at the beginning, and dropped its fix later on
+    val frames = session(30).zipWithIndex.map { case (frame, index) =>
+      if (index < 8 || (index > 20 && index < 24)) frame.copy(metadata = frame.metadata.copy(location = None))
+      else frame
+    }
+    val file   = Files.createTempFile("eclipse-partial-gps-", ".csv")
+    try {
+      FrameStore.save(file, frames)
+      val (loaded, consolidation) = FrameStore.loadSession(file).fold(error => fail(error), identity)
+
+      assertEquals(consolidation.fixCount, 19)
+      assertEquals(consolidation.missingCount, 11)
+      assert(loaded.forall(_.isUsable), s"${loaded.count(!_.isUsable)} frames stayed unusable")
+      assert(loaded.forall(_.metadata.location.contains(observer)), "every frame should share the session position")
+      // and the composition works on the whole session, not only on the frames that had a fix
+      assertEquals(FrameSelector.select(loaded).candidateCount, 30)
+    } finally Files.deleteIfExists(file)
+  }
+
+  test("a session with no GPS at all can still be placed from the given position") {
+    val frames = session(10).map(frame => frame.copy(metadata = frame.metadata.copy(location = None)))
+    val file   = Files.createTempFile("eclipse-no-gps-", ".csv")
+    try {
+      FrameStore.save(file, frames)
+      val withoutPosition = FrameStore.loadSession(file).fold(error => fail(error), identity)
+      assert(withoutPosition._1.forall(!_.isUsable), "without any position nothing can be placed")
+      assert(withoutPosition._2.location.isEmpty)
+
+      val withPosition = FrameStore.loadSession(file, Some(observer)).fold(error => fail(error), identity)
+      assert(withPosition._1.forall(_.isUsable), "the given position should rescue the whole session")
+      assert(withPosition._2.fromFallback)
+    } finally Files.deleteIfExists(file)
+  }
+
   test("the session summary reports what matters") {
     val summary = EclipseComposer.summary(session())
     assert(summary.contains("frames"), summary)
