@@ -7,6 +7,8 @@ import fr.janalyse.sotohp.media.imaging.DiscDetector.{DiscDetection, DiscDetecto
 import fr.janalyse.sotohp.media.imaging.Rasters.GrayRaster
 import fr.janalyse.sotohp.media.imaging.{BasicImaging, DiscDetector, DiscMeasures, RawDecoder}
 
+import java.awt.image.BufferedImage
+
 import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{Executors, TimeUnit}
@@ -21,6 +23,10 @@ final case class FrameAnalysisConfig(
   observer: Option[GeoPoint] = None,
   /** when known, the expected disc radius is enforced during the fit */
   plateScale: Option[PlateScale] = None,
+  /** below that radius in the analysis copy, the analysis is redone on a larger one */
+  minimumAnalysisDiscRadiusPixels: Double = 80d,
+  /** upper bound of the adaptive analysis resolution, memory wise */
+  maximumAnalysisSize: Int = 4000,
   /** use the exposure metadata to tell the unfiltered frames - the totality ones - apart */
   phaseFromExposure: Boolean = true,
   /** how many stops below the session median an exposure has to be to mean "filter removed" */
@@ -51,26 +57,30 @@ object FrameAnalyzer {
       observer <- location
     } yield SolarEphemeris.position(shotAt.toInstant, observer, config.atmosphere)
 
+    var dimensions: Option[(Int, Int)] = None
+
     val disc = RawDecoder.load(path, config.cacheDirectory, config.rawDecode) match {
       case Left(error)  =>
         issues += error
         None
       case Right(image) =>
-        val analysed      = BasicImaging.fitWithin(image, config.detector.analysisMaxSize)
-        val scale         = image.getWidth.toDouble / analysed.getWidth
-        val raster        = GrayRaster.fromImage(analysed)
-        val expected      = expectedRadiusPixels(config, sun).map(_ / scale)
-        val detectorConfig = config.detector.copy(expectedRadiusPixels = expected)
-        DiscDetector.detectOnRaster(raster, detectorConfig) match {
-          case Left(error)      =>
+        dimensions = Some((image.getWidth, image.getHeight))
+        measure(image, config, sun) match {
+          case Left(error) =>
             issues += s"disc detection failed : $error"
             None
-          case Right(detection) =>
-            Some(measuredDisc(detection, raster, scale))
+          case Right(disc) => Some(disc)
         }
     }
 
-    FrameAnalysis(path = path, metadata = metadata, sun = sun, disc = disc, issues = issues.result())
+    // the metadata of a RAW file does not always carry the dimensions of the decoded image, and the
+    // automatic tuning needs them to know how much room there is around the sun in each frame
+    val withDimensions = metadata.copy(
+      imageWidth = metadata.imageWidth.orElse(dimensions.map(_._1)),
+      imageHeight = metadata.imageHeight.orElse(dimensions.map(_._2))
+    )
+
+    FrameAnalysis(path = path, metadata = withDimensions, sun = sun, disc = disc, issues = issues.result())
   }
 
   /** Analyzes a whole session.
@@ -163,7 +173,50 @@ object FrameAnalyzer {
       position <- sun
     } yield scale.pixelsFor(position.semiDiameterDegrees)
 
-  private def measuredDisc(detection: DiscDetection, raster: GrayRaster, scale: Double): MeasuredDisc = {
+  /** Measures the solar disc, adapting the analysis resolution to the size of the subject.
+    *
+    * The analysis is normally done on a downscaled copy, which is plenty when the sun fills a good
+    * part of the frame. On a wider shot the disc would end up a few dozen pixels wide and the
+    * measurement would get coarse, so the analysis is simply redone on a larger copy.
+    */
+  private def measure(image: BufferedImage, config: FrameAnalysisConfig, sun: Option[SunPosition]): Either[String, MeasuredDisc] = {
+    def attempt(analysisMaxSize: Int): Either[String, (DiscDetection, GrayRaster, Double)] = {
+      val analysed       = BasicImaging.fitWithin(image, analysisMaxSize)
+      val scale          = image.getWidth.toDouble / analysed.getWidth
+      val raster         = GrayRaster.fromImage(analysed)
+      val detectorConfig = config.detector.copy(
+        analysisMaxSize = analysisMaxSize,
+        expectedRadiusPixels = expectedRadiusPixels(config, sun).map(_ / scale)
+      )
+      DiscDetector.detectOnRaster(raster, detectorConfig).map(detection => (detection, raster, scale))
+    }
+
+    attempt(config.detector.analysisMaxSize)
+      .flatMap { first =>
+        val (detection, _, scale) = first
+        val wanted                = config.minimumAnalysisDiscRadiusPixels
+        if (detection.circle.radius >= wanted || scale <= 1.0001d) Right(first)
+        else {
+          val enlarged = math.min(
+            math.min(config.maximumAnalysisSize, math.max(image.getWidth, image.getHeight)),
+            (config.detector.analysisMaxSize * math.min(scale, wanted / math.max(1d, detection.circle.radius))).toInt
+          )
+          if (enlarged <= config.detector.analysisMaxSize) Right(first)
+          else attempt(enlarged).orElse(Right(first))
+        }
+      }
+      .map { case (detection, raster, scale) =>
+        measuredDisc(detection, raster, scale, image.getWidth, image.getHeight)
+      }
+  }
+
+  private def measuredDisc(
+    detection: DiscDetection,
+    raster: GrayRaster,
+    scale: Double,
+    imageWidth: Int,
+    imageHeight: Int
+  ): MeasuredDisc = {
     val phase       = detection.kind match {
       case DiscKind.Photosphere => FramePhase.Partial
       case DiscKind.Corona      => FramePhase.Totality
@@ -174,15 +227,25 @@ object FrameAnalyzer {
       case FramePhase.Partial => Some(DiscMeasures.obscuration(raster, detection.circle, Some(detection.thresholdLevel)))
       case _                  => Some(1d)
     }
+    val centerX     = detection.circle.centerX * scale
+    val centerY     = detection.circle.centerY * scale
+    val radius      = detection.circle.radius * scale
+    val signalRadius = DiscMeasures.signalExtentRadius(raster, detection.circle).map(_ * scale)
+    val room         =
+      if (radius <= 0d) None
+      else Some(List(centerX, centerY, imageWidth - centerX, imageHeight - centerY).min / radius)
+
     MeasuredDisc(
-      centerX = detection.circle.centerX * scale,
-      centerY = detection.circle.centerY * scale,
-      radiusPixels = detection.circle.radius * scale,
+      centerX = centerX,
+      centerY = centerY,
+      radiusPixels = radius,
       phase = phase,
       obscuration = obscuration,
       fitResidualPixels = detection.residualRms * scale,
       detectionConfidence = confidenceOf(detection),
-      limbContrast = detection.limbContrast
+      limbContrast = detection.limbContrast,
+      signalRadiusPixels = signalRadius,
+      roomFactor = room
     )
   }
 

@@ -96,6 +96,58 @@ object DiscMeasures {
     if (count == 0L) None else Some((totalRed / count, totalGreen / count, totalBlue / count))
   }
 
+  /** How far the subject actually shines, in pixels from its center.
+    *
+    * The brightness is averaged over concentric rings, and the returned radius is the one where it
+    * falls back into the sky level. On a totality frame this measures the extent of the recorded
+    * corona - which is what a tile has to be large enough to hold, instead of being guessed.
+    *
+    * @param aboveSkyRatio how far above the sky level the signal must still be, as a fraction of
+    *                      the whole dynamic range of the frame
+    */
+  def signalExtentRadius(
+    raster: GrayRaster,
+    circle: Circle,
+    aboveSkyRatio: Double = 0.02d,
+    maximumRadiusFactor: Double = 8d,
+    ringCount: Int = 120
+  ): Option[Double] = {
+    val levels     = raster.percentiles(List(0.5d, 0.9999d))
+    val sky        = levels.head
+    val range      = levels.last - sky
+    if (range <= 0d || circle.radius <= 0d) None
+    else {
+      val threshold     = sky + aboveSkyRatio * range
+      val maximumRadius = circle.radius * maximumRadiusFactor
+      val step          = maximumRadius / ringCount
+      val totals        = Array.ofDim[Double](ringCount)
+      val counts        = Array.ofDim[Int](ringCount)
+      val minimumX      = math.max(0, math.floor(circle.centerX - maximumRadius).toInt)
+      val maximumX      = math.min(raster.width - 1, math.ceil(circle.centerX + maximumRadius).toInt)
+      val minimumY      = math.max(0, math.floor(circle.centerY - maximumRadius).toInt)
+      val maximumY      = math.min(raster.height - 1, math.ceil(circle.centerY + maximumRadius).toInt)
+      var y             = minimumY
+      while (y <= maximumY) {
+        var x = minimumX
+        while (x <= maximumX) {
+          val ring = (circle.distanceToCenter(x, y) / step).toInt
+          if (ring < ringCount) { totals(ring) += raster(x, y); counts(ring) += 1 }
+          x += 1
+        }
+        y += 1
+      }
+      // the outermost ring still above the threshold, scanning inwards so that a lonely bright
+      // detail far away does not extend the measurement
+      var ring  = ringCount - 1
+      var found = -1
+      while (ring >= 0 && found < 0) {
+        if (counts(ring) > 0 && totals(ring) / counts(ring) > threshold) found = ring
+        ring -= 1
+      }
+      if (found < 0) None else Some((found + 1) * step)
+    }
+  }
+
   /** Median color of a ring drawn around the subject : the sky level, measured where the subject is
     * not. Subtracting it removes a twilight gradient, a light polluted sky or a filter flare, and
     * it is a median so a branch or a star crossing the ring does not disturb it.

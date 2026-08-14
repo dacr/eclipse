@@ -135,6 +135,36 @@ class EndToEndTest extends munit.FunSuite {
     }
   }
 
+  test("a thin crescent is drawn as bright as a full disc, not brighter") {
+    val directory = Files.createTempDirectory("eclipse-levels-")
+    val cache     = directory.resolve("cache")
+    try {
+      val random = Random(7)
+      // two frames an hour apart, so that both survive the selection whatever the spacing rule
+      val frames = List(0d, 0.95d).zipWithIndex.map { case (obscuration, index) =>
+        val (path, _) = drawFrame(directory, index * 3, obscuration, random)
+        val instant   = start.plus(Duration.ofSeconds(3600L * index))
+        val measured  = FrameAnalyzer.analyze(path, FrameAnalysisConfig(cacheDirectory = cache, observer = Some(observer)))
+        measured.copy(
+          metadata = measured.metadata.copy(shotAt = Some(instant.atOffset(ZoneOffset.UTC)), location = Some(observer)),
+          sun = Some(SolarEphemeris.position(instant, observer))
+        )
+      }
+
+      val outcome = EclipseComposer
+        .compose(frames, ComposeConfig(cacheDirectory = cache, render = RenderConfig(discRadiusPixels = 60d)))
+        .fold(error => fail(error), identity)
+
+      assertEquals(outcome.result.placements.size, 2)
+      val levels = outcome.result.placements.map { placement =>
+        brightestWithin(outcome.result.image, placement.x, placement.y, placement.discRadiusPixels)
+      }
+      assertEqualsDouble(levels(1), levels(0), 0.12d)
+    } finally {
+      Files.walk(directory).sorted(java.util.Comparator.reverseOrder()).forEach(Files.deleteIfExists(_))
+    }
+  }
+
   private def brightestWithin(image: BufferedImage, centerX: Double, centerY: Double, radius: Double): Double = {
     var brightest = 0d
     var angle     = 0d

@@ -102,7 +102,6 @@ object RawDecoder {
         // temporary directory keeps the source directory untouched.
         val workDirectory = Files.createTempDirectory("sotohp-raw-")
         val linked        = workDirectory.resolve(input.getFileName.toString)
-        val produced      = workDirectory.resolve(s"${input.getFileName.toString}.${if (config.outputExtension == "tiff") "tiff" else "ppm"}")
         val arguments     = List.newBuilder[String]
         arguments += tool.executable
         if (config.outputExtension == "tiff") arguments += "-T"
@@ -116,17 +115,23 @@ object RawDecoder {
         try {
           Files.createSymbolicLink(linked, input.toAbsolutePath)
           val exitCode = Process(arguments.result()).!(logger)
+          // the output name is not guessed : depending on the version, dcraw_emu either replaces or
+          // appends the extension, and the case of the original one is not always kept. Whatever it
+          // did, the only file it could have created is the one that was not there before.
+          val produced = producedFileIn(workDirectory, linked)
           if (exitCode != 0) Left(s"${tool.executable} failed with exit code $exitCode on $input")
-          else if (!Files.exists(produced)) Left(s"${tool.executable} produced no output for $input")
-          else {
-            Files.move(produced, output, StandardCopyOption.REPLACE_EXISTING)
-            Right(output)
-          }
+          else
+            produced match {
+              case None       => Left(s"${tool.executable} produced no output for $input")
+              case Some(file) =>
+                Files.move(file, output, StandardCopyOption.REPLACE_EXISTING)
+                Right(output)
+            }
         } catch {
           case error: Exception => Left(s"${tool.executable} failed on $input : ${error.getMessage}")
         } finally {
           Try(Files.deleteIfExists(linked))
-          Try(Files.deleteIfExists(produced))
+          Try(producedFileIn(workDirectory, linked).foreach(Files.deleteIfExists))
           Try(Files.deleteIfExists(workDirectory))
         }
 
@@ -142,6 +147,18 @@ object RawDecoder {
         val arguments = List(tool.executable, input.toString) ++ config.extraArguments ++ List(output.toString)
         execute(arguments, output, tool, input, logger)
     }
+  }
+
+  /** The file a converter left in its working directory, whatever name it chose for it */
+  private def producedFileIn(directory: Path, ignored: Path): Option[Path] = {
+    val stream = Files.list(directory)
+    try {
+      val found = stream
+        .filter(path => !path.equals(ignored) && Files.isRegularFile(path))
+        .sorted()
+        .findFirst()
+      if (found.isPresent) Some(found.get) else None
+    } finally stream.close()
   }
 
   private def execute(arguments: List[String], output: Path, tool: RawTool, input: Path, logger: ProcessLogger): Either[String, Path] =

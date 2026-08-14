@@ -42,6 +42,8 @@ object FrameStore {
     "fitResidual",
     "confidence",
     "limbContrast",
+    "signalRadius",
+    "roomFactor",
     "issues"
   )
 
@@ -71,6 +73,8 @@ object FrameStore {
         disc.map(_.fitResidualPixels.toString).getOrElse(""),
         disc.map(_.detectionConfidence.toString).getOrElse(""),
         disc.map(_.limbContrast.toString).getOrElse(""),
+        disc.flatMap(_.signalRadiusPixels).map(_.toString).getOrElse(""),
+        disc.flatMap(_.roomFactor).map(_.toString).getOrElse(""),
         frame.issues.mkString(" | ")
       ).map(escape).mkString(";")
     }
@@ -131,7 +135,9 @@ object FrameStore {
       obscuration = number(17),
       fitResidualPixels = number(18).getOrElse(0d),
       detectionConfidence = number(19).getOrElse(1d),
-      limbContrast = number(20).getOrElse(0d)
+      limbContrast = number(20).getOrElse(0d),
+      signalRadiusPixels = number(21),
+      roomFactor = number(22)
     )
 
     val sun = for {
@@ -144,7 +150,7 @@ object FrameStore {
       metadata = metadata,
       sun = sun,
       disc = disc,
-      issues = at(21).map(_.split(""" \| """).toList).getOrElse(Nil)
+      issues = at(23).map(_.split(""" \| """).toList).getOrElse(Nil)
     )
   }
 

@@ -19,7 +19,7 @@ lazy val munit = "org.scalameta" %% "munit" % "1.3.5" % Test
 lazy val commonSettings = Seq(
   libraryDependencies += munit,
   Test / fork          := true,
-  Test / javaOptions ++= Seq("-Xmx2g")
+  Test / javaOptions ++= Seq("-Xmx2g", "-Dfile.encoding=UTF-8")
 )
 
 // Image processing toolbox, packaged under the sotohp namespace : this module is
@@ -76,7 +76,7 @@ lazy val cli = project
     name          := "eclipse-cli",
     Compile / mainClass := Some("fr.janalyse.eclipse.cli.Main"),
     run / fork    := true,
-    run / javaOptions ++= Seq("-Xmx6g"),
+    run / javaOptions ++= Seq("-Xmx6g", "-Dfile.encoding=UTF-8"),
     run / connectInput := true
   )
 

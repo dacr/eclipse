@@ -30,12 +30,16 @@ object Main {
       |  --pressure <hPa>          atmospheric pressure, for the refraction (default : 1010)
       |  --temperature <°C>        temperature, for the refraction (default : 15)
       |
-      |composition options :
-      |  --layout <name>           sky-path (default), sky-path-even, timeline, grid
-      |  --disc-radius <px>        radius of the solar disc in the composite (default : 90)
+composition options :
+      |  every setting below is worked out from the measurements when it is not given
+      |  --no-auto                 keeps the plain defaults instead of the measured settings
+      |  --max-pixels <n>          largest composite to produce (default : 200000000)
+      |  --max-side <n>            largest composite side, in pixels (default : 24000)
+      |  --layout <name>           sky-path, sky-path-even, timeline, grid
+      |  --disc-radius <px>        radius of the solar disc in the composite
       |  --separation <factor>     gap between neighbour tiles, 1.0 = tiles touching (default : 1.05)
-      |  --tile-factor <factor>    room kept around the disc (default : 1.5)
-      |  --totality-factor <f>     room kept around a totality frame (default : 3.0)
+      |  --tile-factor <factor>    room kept around the disc
+      |  --totality-factor <f>     room kept around a totality frame
       |  --blend <mode>            lighten (default), over, add, screen
       |  --columns <n>             grid layout only
       |  --annotate                writes the time under each frame
@@ -93,7 +97,8 @@ object Main {
   private def plan(options: Options): Either[String, String] = {
     for {
       frames <- loadFrames(options)
-      config  = composeConfig(options)
+      tuned   = tuning(options, frames)
+      config  = composeConfig(options, tuned)
     } yield {
       val selection       = FrameSelector.select(frames, config.selection)
       val pixelsPerDegree = EclipseComposer.pixelsPerDegree(frames, config)
@@ -119,6 +124,8 @@ object Main {
       List(
         EclipseComposer.summary(frames),
         "",
+        tuned.explanations.map(explanation => s"automatic             : $explanation").mkString("\n"),
+        "",
         s"layout                : ${config.layout.name}",
         s"selected frames       : ${selection.keptCount} of ${selection.candidateCount}",
         f"output scale          : $pixelsPerDegree%.0f px/° (solar disc ${2 * config.render.discRadiusPixels}%.0f px)",
@@ -133,7 +140,9 @@ object Main {
   private def compose(options: Options): Either[String, String] = {
     for {
       frames  <- loadFrames(options)
-      config   = composeConfig(options)
+      tuned    = tuning(options, frames)
+      config   = composeConfig(options, tuned)
+      _        = tuned.explanations.foreach(explanation => Console.err.println(s"automatic : $explanation"))
       outcome <- EclipseComposer.compose(
                    frames,
                    config,
@@ -180,24 +189,40 @@ object Main {
       parallelism = options.int("parallelism").getOrElse(2)
     )
 
-  private def composeConfig(options: Options): ComposeConfig =
+  /** Everything is measured on the frames, then whatever was asked for explicitly takes over */
+  private def tuning(options: Options, frames: Seq[FrameAnalysis]): AutoTuner.Tuning =
+    if (options.flag("no-auto"))
+      AutoTuner.Tuning(SelectionConfig(), SkyPathLayout(), RenderConfig(), None, List("automatic tuning disabled"))
+    else
+      AutoTuner.tune(
+        frames,
+        AutoTuner.TuningIntent(
+          maximumCanvasPixels = options.double("max-pixels").map(_.toLong).getOrElse(200000000L),
+          maximumCanvasSide = options.int("max-side").getOrElse(24000),
+          separationFactor = options.double("separation").getOrElse(1.05d)
+        )
+      )
+
+  private def composeConfig(options: Options, tuned: AutoTuner.Tuning): ComposeConfig =
     ComposeConfig(
       cacheDirectory = options.path("cache").getOrElse(Paths.get(".eclipse-cache")),
       selection = SelectionConfig(
-        separationFactor = options.double("separation").getOrElse(1.05d),
-        tileRadiusFactor = options.double("tile-factor").getOrElse(1.5d),
-        totalityTileRadiusFactor = options.double("totality-factor").getOrElse(3d)
+        separationFactor = options.double("separation").getOrElse(tuned.selection.separationFactor),
+        tileRadiusFactor = options.double("tile-factor").getOrElse(tuned.selection.tileRadiusFactor),
+        totalityTileRadiusFactor = options.double("totality-factor").getOrElse(tuned.selection.totalityTileRadiusFactor)
       ),
-      layout = options.value("layout").getOrElse("sky-path") match {
-        case "sky-path-even" => SkyPathLayout(evenSpacing = true)
-        case "timeline"      => TimelineLayout()
-        case "grid"          => GridLayout(options.int("columns"))
-        case _               => SkyPathLayout()
+      layout = options.value("layout") match {
+        case Some("sky-path-even") => SkyPathLayout(evenSpacing = true)
+        case Some("timeline")      => TimelineLayout()
+        case Some("grid")          => GridLayout(options.int("columns"))
+        case Some("sky-path")      => SkyPathLayout()
+        case _                     => tuned.layout
       },
       render = RenderConfig(
-        discRadiusPixels = options.double("disc-radius").getOrElse(90d),
-        tileRadiusFactor = options.double("tile-factor").getOrElse(1.5d),
-        totalityTileRadiusFactor = options.double("totality-factor").getOrElse(3d),
+        discRadiusPixels = options.double("disc-radius").getOrElse(tuned.render.discRadiusPixels),
+        tileRadiusFactor = options.double("tile-factor").getOrElse(tuned.render.tileRadiusFactor),
+        totalityTileRadiusFactor = options.double("totality-factor").getOrElse(tuned.render.totalityTileRadiusFactor),
+        marginPixels = options.int("margin").getOrElse(tuned.render.marginPixels),
         blendMode = options.value("blend").getOrElse("lighten") match {
           case "over"   => BlendMode.Over
           case "add"    => BlendMode.Add
@@ -270,7 +295,7 @@ object Main {
     private val valuedOptions = Set(
       "out", "cache", "observer", "parallelism", "pressure", "temperature",
       "layout", "disc-radius", "separation", "tile-factor", "totality-factor",
-      "blend", "columns", "caption", "quality"
+      "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin"
     )
 
     def parse(arguments: List[String]): Options = {

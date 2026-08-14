@@ -69,13 +69,44 @@ sauvée en CSV. Ensuite, essayer une autre mise en page ou un autre rendu est im
 le CSV se relit, s'inspecte et se corrige à la main si une photo a été mal mesurée.
 
 ```bash
-sbt "cli/run analyze /photos/eclipse --observer 43.6,1.44 --out measurements.csv"
-sbt "cli/run plan measurements.csv --disc-radius 90"
-sbt "cli/run compose measurements.csv --disc-radius 90 --annotate --out composite.png"
+sbt "cli/run analyze /photos/eclipse --out measurements.csv"
+sbt "cli/run plan measurements.csv"
+sbt "cli/run compose measurements.csv --annotate --out composite.png"
 ```
 
-`--observer` n'est utile que si les EXIF ne portent pas de GPS ; sinon la position est lue
-photo par photo.
+Aucun réglage n'est nécessaire : tout est déduit des mesures (voir plus bas). `--observer`
+n'est utile que si les EXIF ne portent pas de GPS ; sinon la position est lue photo par
+photo. Les extensions sont insensibles à la casse : `.CR3`, `.cr3`, `.Cr3` sont traités de
+la même façon, comme `.JPG` ou `.PNG`.
+
+## Les réglages trouvés tout seuls
+
+`plan` et `compose` commencent par mesurer, puis annoncent ce qu'ils ont décidé :
+
+```
+automatic : plate scale measured at 795 px/°, solar disc 421 px on the sensor
+automatic : tile radius set to 1.35 disc radius, just enough for the edges to fade out
+automatic : totality tile radius set to 2.42 disc radius, recorded corona reaches 2.20 radius
+automatic : 52 frames kept out of 331, spaced so that no two discs touch
+automatic : drawn at 62% of the sensor resolution, 520 px per solar disc, otherwise the
+            composite would reach 32600 x 9100 px
+automatic : composite will be about 20200 x 5600 px for a 41.2° x 11.4° field
+```
+
+| ce qui est réglé | comment |
+|---|---|
+| échelle du montage (px/°) | mesurée sur les disques eux-mêmes, rapportée au demi-diamètre de l'éphéméride |
+| rayon du disque en sortie | le plus grand possible sans dépasser la résolution réelle du capteur ni la taille de sortie demandée (`--max-pixels`, `--max-side`) |
+| taille des vignettes | juste ce qu'il faut pour le fondu des bords, réduit si le soleil frôle un bord de cadre (mesuré photo par photo) |
+| taille des vignettes de totalité | l'étendue de couronne **réellement enregistrée**, mesurée par moyennes sur anneaux concentriques |
+| choix de la mise en page | trajectoire si le soleil a bougé, planche contact sinon |
+| résolution d'analyse | augmentée automatiquement si le disque est petit dans le cadre |
+| rayon imposé au recalage | issu de l'échelle, pour fiabiliser les croissants fins et la totalité |
+| identification des vues sans filtre | par l'IL EXIF, comparé à la médiane de la séance |
+| dominante, luminosité, niveau de ciel | mesurés sur chaque photo |
+
+Toute option donnée explicitement l'emporte sur la valeur trouvée ; `--no-auto` revient aux
+valeurs par défaut brutes.
 
 ### Mises en page disponibles
 
@@ -90,10 +121,12 @@ photo par photo.
 
 | option | rôle |
 |---|---|
-| `--disc-radius` | taille du soleil dans le composite ; fixe toute l'échelle de sortie |
+| `--max-pixels`, `--max-side` | bornes de la taille de sortie, c'est le seul réglage vraiment utile |
+| `--disc-radius` | force la taille du soleil dans le composite, donc l'échelle de sortie |
 | `--separation` | 1,0 = disques jointifs, 1,05 = 5 % d'air (défaut) |
-| `--tile-factor` | marge autour du disque (1,5 par défaut) |
-| `--totality-factor` | marge autour d'une vue de totalité (3,0 : la couronne déborde) |
+| `--tile-factor` | force la marge autour du disque |
+| `--totality-factor` | force la marge autour d'une vue de totalité |
+| `--no-auto` | ignore les mesures et reprend les valeurs par défaut |
 | `--blend` | `lighten` par défaut : sur ciel noir, les bords de vignettes deviennent invisibles |
 | `--no-sky-fix`, `--no-color-fix`, `--no-brightness-fix` | désactivent les corrections automatiques |
 
@@ -169,7 +202,7 @@ rien connaître de l'éclipse, uniquement en termes d'image :
 | `DiscMeasures` | obscuration, niveaux et couleurs dans le disque, niveau de ciel sur un anneau |
 | `ToneMapping` / `ColorBalance` | niveaux, gamma, normalisation, neutralisation de dominante, soustraction de fond |
 | `Compositing` | extraction de vignette normalisée, masque radial adouci, canevas et modes de fusion |
-| `RawDecoder` | décodage RAW délégué à dcraw_emu / darktable-cli / rawtherapee-cli / ImageMagick, avec cache |
+| `RawDecoder` | décodage RAW délégué à dcraw_emu / darktable-cli / rawtherapee-cli / ImageMagick, avec cache, extensions insensibles à la casse et découverte du fichier produit (le convertisseur choisit son nom) |
 | `LinearAlgebra` | résolution de systèmes, ajustement polynomial |
 
 Toutes ces fonctions sont utilisables seules : rien n'y suppose une éclipse, ni même une
@@ -187,8 +220,12 @@ séquence.
   en cache (`.eclipse-cache`).
 
 ```bash
-sbt test        # 29 tests
+sbt test        # 42 tests
 sbt cli/run     # aide en ligne
+
+# une session d'exemple, pour essayer sans sortir les RAW
+sbt "composer/Test/runMain fr.janalyse.eclipse.composer.SampleSessionGenerator /tmp/session 120"
+sbt "cli/run compose /tmp/session/measurements.csv --out /tmp/session/composite.png"
 ```
 
 ---

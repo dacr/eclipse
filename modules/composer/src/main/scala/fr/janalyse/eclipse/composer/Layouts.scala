@@ -99,12 +99,10 @@ final case class SkyPathLayout(
           val abscissa = first + (last - first) * index / sampleCount
           (abscissa, LinearAlgebra.evaluatePolynomial(coefficients, abscissa))
         }
-        val lengths    = curve
-          .sliding(2)
-          .scanLeft(0d) { case (total, Seq(previous, current)) =>
-            total + math.hypot(current._1 - previous._1, current._2 - previous._2)
-          }
-          .toVector
+        val steps      = curve.zip(curve.tail).map { case (previous, current) =>
+          math.hypot(current._1 - previous._1, current._2 - previous._2)
+        }
+        val lengths    = steps.scanLeft(0d)(_ + _).toVector
         val totalLength = lengths.last
         placements.zipWithIndex.map { case (placement, index) =>
           val target   = totalLength * index / (placements.size - 1)

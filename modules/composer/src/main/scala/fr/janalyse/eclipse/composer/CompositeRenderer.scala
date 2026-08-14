@@ -219,20 +219,27 @@ object CompositeRenderer {
         stretched.toImage
 
       case _ =>
+        // The reference is the brightness of the photosphere itself, taken as a high percentile of
+        // the whole tile. Measuring it over the disc area would collapse as the moon covers it :
+        // a thin crescent would then be stretched until it saturates, and would come out white or
+        // oddly tinted while its neighbours stay correct.
+        val photosphereLevel = raster.toGray.percentile(0.999d)
+        val litLevel         = math.max(0.01d, photosphereLevel * 0.5d)
+
         val neutralized =
           if (!config.neutralizeColorCast) raster
           else
             DiscMeasures
-              .meanColorWithin(raster, disc)
+              .meanColorWithin(raster, disc, litLevel)
               .map(reference => ColorBalance.neutralizeFrom(raster, reference, config.discColor))
               .getOrElse(raster)
-        val normalized  =
+
+        val normalized =
           if (!config.normalizeBrightness) neutralized
-          else
-            DiscMeasures
-              .highLevelWithin(neutralized.toGray, disc, 0.9d)
-              .map(level => ToneMapping.normalizeReferenceLevel(neutralized, level, config.targetDiscLevel))
-              .getOrElse(neutralized)
+          else {
+            val reference = neutralized.toGray.percentile(0.999d)
+            ToneMapping.normalizeReferenceLevel(neutralized, reference, config.targetDiscLevel)
+          }
         normalized.toImage
     }
   }

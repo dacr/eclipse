@@ -112,7 +112,11 @@ final case class MeasuredDisc(
   fitResidualPixels: Double,
   detectionConfidence: Double,
   /** brightness step measured across the outer edge, high when the photosphere limb is visible */
-  limbContrast: Double = 0d
+  limbContrast: Double = 0d,
+  /** how far the subject actually shines, in pixels : the corona extent on a totality frame */
+  signalRadiusPixels: Option[Double] = None,
+  /** how much room there is around the disc before reaching the frame border, in disc radius units */
+  roomFactor: Option[Double] = None
 )
 
 /** Image scale, the bridge between the sky and the sensor */
