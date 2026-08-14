@@ -7,7 +7,7 @@ import fr.janalyse.eclipse.model.{AtmosphericConditions, FrameAnalysis, GeoPoint
 import fr.janalyse.sotohp.media.imaging.Compositing.BlendMode
 import fr.janalyse.sotohp.media.imaging.{BasicImaging, DiscDetector, RawDecoder}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{FileVisitOption, Files, Path, Paths}
 import java.time.{Duration, ZoneOffset}
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
@@ -30,7 +30,7 @@ object Main {
       |  --pressure <hPa>          atmospheric pressure, for the refraction (default : 1010)
       |  --temperature <°C>        temperature, for the refraction (default : 15)
       |
-composition options :
+      |composition options :
       |  every setting below is worked out from the measurements when it is not given
       |  --no-auto                 keeps the plain defaults instead of the measured settings
       |  --max-pixels <n>          largest composite to produce (default : 200000000)
@@ -255,18 +255,49 @@ composition options :
         }
     }
 
+  private val supportedExtensions =
+    RawDecoder.rawFileExtensions ++ Set("jpg", "jpeg", "png", "tif", "tiff", "heic", "heif")
+
+  /** Expands the given inputs into the list of images to work on.
+    *
+    * Directories are walked through, symbolic links are followed - pointing the tool at a link
+    * named `photos-eclipse` is the expected way of using it - and extensions are matched
+    * regardless of their case, `.CR3` and `.cr3` alike.
+    */
   private def imageInputs(options: Options): Either[String, List[Path]] = {
-    val supported = RawDecoder.rawFileExtensions ++ Set("jpg", "jpeg", "png", "tif", "tiff", "heic", "heif")
-    val expanded  = options.inputs.flatMap { input =>
-      if (Files.isDirectory(input)) {
-        Try(Files.list(input).iterator().asScala.toList).getOrElse(Nil)
-      } else List(input)
+    val missing = options.inputs.filterNot(Files.exists(_))
+    if (options.inputs.isEmpty) Left("no input given, name a directory or a list of files")
+    else if (missing.nonEmpty)
+      Left(
+        s"${missing.map(_.toAbsolutePath).mkString(", ")} does not exist " +
+          s"(paths are resolved from ${Paths.get("").toAbsolutePath})"
+      )
+    else {
+      val expanded = options.inputs.flatMap { input =>
+        if (!Files.isDirectory(input)) List(input)
+        else
+          Try {
+            val stream = Files.walk(input, 4, FileVisitOption.FOLLOW_LINKS)
+            try stream.iterator().asScala.toList
+            finally stream.close()
+          }.getOrElse(Nil)
+      }
+      val files    = expanded.filter(Files.isRegularFile(_))
+      val images   = files
+        .filter(path => BasicImaging.fileTypeFromName(path).exists(supportedExtensions.contains))
+        .sortBy(_.getFileName.toString)
+
+      if (images.nonEmpty) Right(images)
+      else {
+        val seen = files.flatMap(path => BasicImaging.fileTypeFromName(path)).distinct.sorted
+        Left(
+          s"no supported image found in ${options.inputs.map(_.toAbsolutePath).mkString(", ")} : " +
+            s"${files.size} files seen" +
+            (if (seen.isEmpty) "" else s", extensions ${seen.mkString(", ")}") +
+            s". Supported : ${supportedExtensions.toList.sorted.mkString(", ")}"
+        )
+      }
     }
-    val images    = expanded
-      .filter(Files.isRegularFile(_))
-      .filter(path => BasicImaging.fileTypeFromName(path).exists(supported.contains))
-      .sortBy(_.getFileName.toString)
-    Either.cond(images.nonEmpty, images, "no supported image found in the given inputs")
   }
 
   // ---------------------------------------------------------------------------------------------

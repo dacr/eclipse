@@ -63,11 +63,13 @@ final case class ShotMetadata(
   exposureTimeSeconds: Option[Double],
   isoSensitivity: Option[Double],
   imageWidth: Option[Int],
-  imageHeight: Option[Int]
+  imageHeight: Option[Int],
+  /** sensor pixel pitch, when the camera recorded its focal plane resolution */
+  pixelPitchMicrometers: Option[Double] = None
 )
 
 object ShotMetadata {
-  val empty: ShotMetadata = ShotMetadata(None, None, None, None, None, None, None, None, None, None)
+  val empty: ShotMetadata = ShotMetadata(None, None, None, None, None, None, None, None, None, None, None)
 }
 
 extension (metadata: ShotMetadata) {
@@ -87,6 +89,18 @@ extension (metadata: ShotMetadata) {
       val sensitivity = metadata.isoSensitivity.getOrElse(100d).max(1d)
       math.log(aperture * aperture / time) / math.log(2d) - math.log(sensitivity / 100d) / math.log(2d)
     }
+
+  /** Plate scale deduced from the optics alone, when the camera recorded enough to compute it.
+    *
+    * No image needed : it gives the expected size of the solar disc before anything is measured,
+    * which is exactly what the hardest frames - the totality ones - need to be located.
+    */
+  def opticalPlateScale: Option[PlateScale] =
+    for {
+      focal <- metadata.focalLengthMillimeters
+      pitch <- metadata.pixelPitchMicrometers
+      if focal > 0d && pitch > 0d
+    } yield PlateScale.fromOptics(focal, pitch)
 }
 
 /** How the solar disc shows up on a given frame */

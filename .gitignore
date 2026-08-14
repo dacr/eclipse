@@ -8,3 +8,5 @@ target/
 measurements.csv
 composite*.png
 composite*.jpg
+photos-eclipse
+out/

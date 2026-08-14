@@ -68,8 +68,22 @@ La mesure (décodage RAW compris) est l'étape longue ; elle est faite **une foi
 sauvée en CSV. Ensuite, essayer une autre mise en page ou un autre rendu est immédiat — et
 le CSV se relit, s'inspecte et se corrige à la main si une photo a été mal mesurée.
 
+Le `Makefile` sert d'aide-mémoire et suppose un lien `photos-eclipse` dans le répertoire
+courant :
+
 ```bash
-sbt "cli/run analyze /photos/eclipse --out measurements.csv"
+make            # la liste des cibles
+make check      # que voit-on dans photos-eclipse, et quel décodeur RAW est installé ?
+make analyze    # mesure tout, une fois pour toutes -> out/measurements.csv
+make plan       # ce qui serait dessiné, sans rien dessiner
+make preview    # un petit composite, pour juger
+make compose    # le vrai -> out/composite.png
+```
+
+En direct :
+
+```bash
+sbt "cli/run analyze photos-eclipse --out measurements.csv"
 sbt "cli/run plan measurements.csv"
 sbt "cli/run compose measurements.csv --annotate --out composite.png"
 ```
@@ -101,7 +115,8 @@ automatic : composite will be about 20200 x 5600 px for a 41.2° x 11.4° field
 | taille des vignettes de totalité | l'étendue de couronne **réellement enregistrée**, mesurée par moyennes sur anneaux concentriques |
 | choix de la mise en page | trajectoire si le soleil a bougé, planche contact sinon |
 | résolution d'analyse | augmentée automatiquement si le disque est petit dans le cadre |
-| rayon imposé au recalage | issu de l'échelle, pour fiabiliser les croissants fins et la totalité |
+| rayon imposé au recalage | issu de l'échelle, ou de l'optique (focale + pas des photosites lus dans l'EXIF) avant même d'avoir regardé une image |
+| point de départ de l'analyse | une vue de totalité, repérée à l'exposition |
 | identification des vues sans filtre | par l'IL EXIF, comparé à la médiane de la séance |
 | dominante, luminosité, niveau de ciel | mesurés sur chaque photo |
 
@@ -141,6 +156,23 @@ on ajuste un cercle **robuste** qui ne retient que l'arc extérieur (le limbe so
 rejette l'arc intérieur (le limbe lunaire). L'opération est refaite une seconde fois
 depuis le centre trouvé, pour que les rayons échantillonnent le limbe uniformément.
 Mesuré sur images de synthèse : erreur < 1 px et RMS de 0,3 px jusqu'à 85 % d'obscuration.
+
+**On commence par la totalité, puis on s'en éloigne.** Les photos ne sont pas mesurées dans
+l'ordre du répertoire : une vue de totalité est repérée d'abord — à l'exposition seule, sans
+regarder une seule image — et sert d'ancre. La séance est ensuite parcourue **vers l'avant
+et vers l'arrière** à partir de là, chaque photo transmettant à la suivante la position
+qu'elle vient de mesurer. À 30 s d'intervalle le soleil a très peu bougé : cette position
+est un excellent point de départ, et les croissants les plus fins — ceux qui entourent la
+totalité — sont mesurés avec toute la géométrie déjà connue. Un recadrage rend simplement
+l'indication invalide, elle est alors ignorée. Le décodage des RAW, lui, court en avance en
+tâche de fond, dans le même ordre.
+
+Attention au sens de l'écart d'exposition, contre-intuitif : le filtre ne rend pas les
+réglages extrêmes, il les rend ordinaires. Un ND1000000 ramène le soleil à du 1/125 f/8
+100 ISO, tandis que la couronne, sans filtre, demande une pose bien plus longue. Les vues de
+totalité sont donc **quelques IL en dessous** du reste de la séance, pas vingt au-dessus. La
+plus longue série continue de ces vues donne la totalité, et son milieu donne l'ancre — pas
+un anneau de diamant.
 
 **Le rayon connu d'avance.** L'éphéméride donne le demi-diamètre apparent du soleil, et la
 première passe donne l'échelle du montage (px/°) : le rayon attendu est donc connu. Sur
@@ -220,7 +252,7 @@ séquence.
   en cache (`.eclipse-cache`).
 
 ```bash
-sbt test        # 42 tests
+sbt test        # 49 tests
 sbt cli/run     # aide en ligne
 
 # une session d'exemple, pour essayer sans sortir les RAW
@@ -241,3 +273,5 @@ sbt "cli/run compose /tmp/session/measurements.csv --out /tmp/session/composite.
   soleil en est proche, il faut réduire `--tile-factor` ou écarter la photo.
 - L'orientation est supposée fixe (trépied de niveau) ; une correction de roulis par photo
   serait à ajouter si le cadrage a été repris en biais.
+- Le chemin RAW/EXIF n'a pas pu être validé sur de vrais CR3 : ni décodeur RAW ni fichiers
+  Canon ici. `make check` dit ce qui manque sur ta machine.

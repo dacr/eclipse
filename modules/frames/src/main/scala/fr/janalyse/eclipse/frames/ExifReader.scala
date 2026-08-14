@@ -44,9 +44,30 @@ object ExifReader {
       exposureTimeSeconds = doubleTag(exifSub, ExifDirectoryBase.TAG_EXPOSURE_TIME),
       isoSensitivity = doubleTag(exifSub, ExifDirectoryBase.TAG_ISO_EQUIVALENT),
       imageWidth = intTag(exifSub, ExifDirectoryBase.TAG_EXIF_IMAGE_WIDTH),
-      imageHeight = intTag(exifSub, ExifDirectoryBase.TAG_EXIF_IMAGE_HEIGHT)
+      imageHeight = intTag(exifSub, ExifDirectoryBase.TAG_EXIF_IMAGE_HEIGHT),
+      pixelPitchMicrometers = pixelPitch(exifSub.orElse(exif))
     )
   }
+
+  /** Sensor pixel pitch, from the focal plane resolution the camera recorded.
+    *
+    * Together with the focal length it gives the plate scale of the setup - hence the expected size
+    * of the solar disc in pixels - without having looked at a single image.
+    */
+  private def pixelPitch(directory: Option[com.drew.metadata.Directory]): Option[Double] =
+    for {
+      found      <- directory
+      if found.containsTag(ExifDirectoryBase.TAG_FOCAL_PLANE_X_RESOLUTION)
+      resolution <- Try(found.getDouble(ExifDirectoryBase.TAG_FOCAL_PLANE_X_RESOLUTION)).toOption
+      if resolution > 0d
+      unit        = Try(found.getInt(ExifDirectoryBase.TAG_FOCAL_PLANE_RESOLUTION_UNIT)).getOrElse(2)
+      micrometers = unit match {
+                      case 3 => 10000d // centimeter
+                      case 4 => 1000d  // millimeter
+                      case 5 => 1d     // micrometer
+                      case _ => 25400d // inch, the usual one
+                    }
+    } yield micrometers / resolution
 
   /** Shooting instant, with the best time zone information available */
   private def shootDateTime(exifSub: Option[ExifSubIFDDirectory], gps: Option[GpsDirectory]): Option[OffsetDateTime] = {

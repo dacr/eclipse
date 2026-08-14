@@ -34,6 +34,11 @@ object DiscDetector {
     /** distance at which the edge contrast is measured, in pixels on each side of the edge */
     limbContrastSpan: Double = 4d,
     expectedRadiusPixels: Option[Double] = None,
+    /** where the subject is expected to be, typically propagated from the previous frame of a
+      * sequence : it is used as the origin of the rays and to focus the corona centroid, and it is
+      * silently ignored when it does not land on the subject - a re-framing, a cloud, a mistake
+      */
+    expectedCenter: Option[(Double, Double)] = None,
     /** forces the interpretation, typically from the exposure metadata */
     kindHint: Option[DiscKind] = None,
     fitIterations: Int = 8,
@@ -63,9 +68,13 @@ object DiscDetector {
   def detect(image: BufferedImage, config: DiscDetectorConfig = DiscDetectorConfig()): Either[String, DiscDetection] = {
     val analysed = BasicImaging.fitWithin(image, config.analysisMaxSize)
     val scale    = image.getWidth.toDouble / analysed.getWidth
-    val expected = config.expectedRadiusPixels.map(_ / scale)
-    detectOnRaster(GrayRaster.fromImage(analysed), config.copy(expectedRadiusPixels = expected))
-      .map(detection => detection.copy(circle = detection.circle.scaled(scale)))
+    detectOnRaster(
+      GrayRaster.fromImage(analysed),
+      config.copy(
+        expectedRadiusPixels = config.expectedRadiusPixels.map(_ / scale),
+        expectedCenter = config.expectedCenter.map { case (x, y) => (x / scale, y / scale) }
+      )
+    ).map(detection => detection.copy(circle = detection.circle.scaled(scale)))
   }
 
   /** Detects the subject on an already prepared luminance raster */
@@ -83,7 +92,8 @@ object DiscDetector {
       else {
         mask.centroid match {
           case None           => Left("no lit pixel found")
-          case Some((cx, cy)) =>
+          case Some(centroid) =>
+            val (cx, cy) = trustedCenter(config, centroid, raster)
             val samples  = scanRays(raster, mask, cx, cy, range, config)
             val contrast = medianContrast(samples)
             val kind     = config.kindHint.getOrElse {
@@ -92,7 +102,7 @@ object DiscDetector {
             }
             kind match {
               case DiscKind.Photosphere => fitPhotosphere(raster, mask, samples, threshold, contrast, range, config)
-              case DiscKind.Corona      => fitCorona(raster, mask, threshold, contrast, config)
+              case DiscKind.Corona      => fitCorona(raster, mask, threshold, contrast, (cx, cy), config)
             }
         }
       }
@@ -158,8 +168,12 @@ object DiscDetector {
     mask: BitMask,
     threshold: Double,
     contrast: Double,
+    origin: (Double, Double),
     config: DiscDetectorConfig
   ): Either[String, DiscDetection] = {
+    // the weighting is kept around the expected position when there is one : a diamond ring, a
+    // reflection or a bright planet elsewhere in the frame would otherwise drag the center away
+    val window = config.expectedCenter.map(_ => config.expectedRadiusPixels.getOrElse(mask.width / 8d) * 4d)
     var totalX = 0d
     var totalY = 0d
     var total  = 0d
@@ -167,8 +181,9 @@ object DiscDetector {
     while (y < raster.height) {
       var x = 0
       while (x < raster.width) {
-        val level = raster(x, y) - threshold
-        if (level > 0f) { totalX += x * level; totalY += y * level; total += level }
+        val inside = window.forall(radius => math.hypot(x - origin._1, y - origin._2) <= radius)
+        val level  = raster(x, y) - threshold
+        if (inside && level > 0f) { totalX += x * level; totalY += y * level; total += level }
         x += 1
       }
       y += 1
@@ -233,6 +248,26 @@ object DiscDetector {
       }
     }
   }
+
+  /** Where to cast the rays from : the expected position when it is plausible, the center of
+    * gravity of the lit pixels otherwise.
+    *
+    * The expected position does not have to fall on a lit pixel - on a crescent it lands on the
+    * moon, which is exactly where rays should start from. It is only refused when it is too far
+    * away from what the frame shows, which is what happens after a re-framing.
+    */
+  private def trustedCenter(
+    config: DiscDetectorConfig,
+    centroid: (Double, Double),
+    raster: GrayRaster
+  ): (Double, Double) =
+    config.expectedCenter match {
+      case None                 => centroid
+      case Some((x, y))         =>
+        val reach   = config.expectedRadiusPixels.map(_ * 3d).getOrElse(math.hypot(raster.width, raster.height) / 4d)
+        val inFrame = x >= 0 && y >= 0 && x < raster.width && y < raster.height
+        if (inFrame && math.hypot(x - centroid._1, y - centroid._2) <= reach) (x, y) else centroid
+    }
 
   private def medianContrast(samples: Seq[EdgeSample]): Double =
     if (samples.isEmpty) 0d

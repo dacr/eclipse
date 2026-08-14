@@ -29,8 +29,10 @@ final case class FrameAnalysisConfig(
   maximumAnalysisSize: Int = 4000,
   /** use the exposure metadata to tell the unfiltered frames - the totality ones - apart */
   phaseFromExposure: Boolean = true,
-  /** how many stops below the session median an exposure has to be to mean "filter removed" */
-  unfilteredExposureDrop: Double = 5d,
+  /** how many stops below the session median an exposure has to be to mean "filter removed" :
+    * a very dense filter and a bare lens on the corona are only a few stops apart
+    */
+  unfilteredExposureDrop: Double = 2.5d,
   parallelism: Int = 2
 )
 
@@ -41,7 +43,14 @@ final case class FrameAnalysisConfig(
   */
 object FrameAnalyzer {
 
-  def analyze(path: Path, config: FrameAnalysisConfig = FrameAnalysisConfig()): FrameAnalysis = {
+  /** What is known of the subject before looking at a frame, propagated from the previous one */
+  final case class FramePrior(centerX: Double, centerY: Double, radiusPixels: Double)
+
+  def analyze(
+    path: Path,
+    config: FrameAnalysisConfig = FrameAnalysisConfig(),
+    prior: Option[FramePrior] = None
+  ): FrameAnalysis = {
     val issues   = List.newBuilder[String]
     val metadata = ExifReader.read(path) match {
       case Right(found) => found
@@ -65,7 +74,7 @@ object FrameAnalyzer {
         None
       case Right(image) =>
         dimensions = Some((image.getWidth, image.getHeight))
-        measure(image, config, sun) match {
+        measure(image, config, sun, prior) match {
           case Left(error) =>
             issues += s"disc detection failed : $error"
             None
@@ -83,11 +92,21 @@ object FrameAnalyzer {
     FrameAnalysis(path = path, metadata = withDimensions, sun = sun, disc = disc, issues = issues.result())
   }
 
-  /** Analyzes a whole session.
+  /** Analyzes a whole session, starting from totality and working outwards.
     *
-    * Two passes : the first one measures the discs freely, which gives the plate scale of the setup
-    * (pixels per degree), the second one goes back to the frames whose fit looks doubtful - deep
-    * partial phases and totality - and constrains their radius to the expected one.
+    * The order matters. A frame taken during totality is the anchor : it is the reference moment of
+    * the whole session, and it is also the hardest frame to measure, since there is no photosphere
+    * left to fit. It is found beforehand from the exposure metadata alone - the unfiltered frames
+    * stand a few stops apart from the rest of the session - so no image has to be looked at first.
+    *
+    * From that anchor the session is walked in both directions, each frame handing over what it
+    * measured to the next one : one shot every 30 seconds means the sun barely moved in between, so
+    * the previous position is an excellent starting point, and the thin crescents around totality
+    * are then measured with the whole geometry already known. A re-framing simply invalidates the
+    * hint, which is then ignored.
+    *
+    * RAW decoding runs ahead in the background : it is the expensive part, it is cached, and it does
+    * not depend on the measurements.
     */
   def analyzeAll(
     paths: Seq[Path],
@@ -95,22 +114,192 @@ object FrameAnalyzer {
     onProgress: (Int, Int, FrameAnalysis) => Unit = (_, _, _) => ()
   ): (List[FrameAnalysis], Option[PlateScale]) = {
     Files.createDirectories(config.cacheDirectory)
-    val firstPass  = withExposurePhases(runAll(paths, config, onProgress), config)
-    val plateScale = config.plateScale.orElse(estimatePlateScale(firstPass))
-    plateScale match {
-      case None        => (firstPass, None)
-      case Some(scale) =>
-        val refinedConfig = config.copy(plateScale = Some(scale))
-        val toRefine      = firstPass.filter(frame => needsRefinement(frame, scale)).map(_.path).toSet
-        if (toRefine.isEmpty) (firstPass, plateScale)
-        else {
-          val refined  = withExposurePhases(runAll(paths.filter(toRefine.contains), refinedConfig, onProgress), config)
-            .map(frame => frame.path -> frame)
-            .toMap
-          val combined = firstPass.map(frame => refined.getOrElse(frame.path, frame))
-          (combined, plateScale)
-        }
+    if (paths.isEmpty) (Nil, None)
+    else {
+      val metadata    = readAllMetadata(paths, config)
+      val ordered     = metadata.sortBy { case (_, found) => found.shotAt.map(_.toInstant.toEpochMilli).getOrElse(0L) }
+      val anchorIndex = anchorOf(ordered.map(_._2), config)
+      val seedScale   = config.plateScale.orElse(ordered.flatMap(_._2.opticalPlateScale).headOption)
+
+      val prefetcher = startPrefetching(ordered.map(_._1), anchorIndex, config)
+      val firstPass  =
+        try walkFromAnchor(ordered.map(_._1), anchorIndex, seedScale, config, onProgress)
+        finally prefetcher.shutdownNow()
+
+      val measured   = withExposurePhases(firstPass.toList, config)
+      val plateScale = config.plateScale.orElse(estimatePlateScale(measured)).orElse(seedScale)
+
+      plateScale match {
+        case None        => (measured, None)
+        case Some(scale) =>
+          // one last look at the frames whose fit stayed doubtful, this time with the plate scale
+          // of the session and with the neighbours already measured
+          val refinedConfig = config.copy(plateScale = Some(scale))
+          val refined       = measured.zipWithIndex.map { case (frame, index) =>
+            if (!needsRefinement(frame, scale)) frame
+            else {
+              val prior = neighbourPrior(measured, index)
+              val again = analyze(frame.path, refinedConfig, prior)
+              if (again.disc.isDefined) again else frame
+            }
+          }
+          (withExposurePhases(refined, config), plateScale)
+      }
     }
+  }
+
+  /** The frames shot with the filter removed, told apart by their exposure alone.
+    *
+    * Beware of the intuition here : the filter does not make the exposure settings extreme, it makes
+    * them ordinary. A ND1000000 turns the sun into something one shoots at 1/125 f/8 100 ISO, while
+    * the corona, bare lens, needs a much longer exposure - so the totality frames sit a few stops
+    * *below* the exposure value the rest of the session settles on, not twenty.
+    *
+    * A few stops of difference is not much, so two guards are added : the unfiltered frames can only
+    * be a minority of the session, and the exposure alone never decides anything on its own - the
+    * image always has the last word when it shows an unmistakable limb.
+    */
+  def unfilteredIndices(metadata: Seq[ShotMetadata], config: FrameAnalysisConfig): Seq[Int] = {
+    val exposureValues = metadata.flatMap(_.exposureValue).sorted
+    if (!config.phaseFromExposure || exposureValues.sizeIs < 3) Nil
+    else {
+      val median     = exposureValues(exposureValues.size / 2)
+      val candidates = metadata.zipWithIndex.collect {
+        case (found, index) if found.exposureValue.exists(_ <= median - config.unfilteredExposureDrop) => index
+      }
+      // totality lasts minutes, a session lasts hours : anything else means the exposure varied for
+      // some other reason - the sun getting low, a cloud, a change of mind
+      if (candidates.size > metadata.size * 0.4d) Nil else candidates
+    }
+  }
+
+  /** The frame the whole analysis starts from : one taken during totality.
+    *
+    * Totality is a single continuous stretch of a couple of minutes, so the longest run of
+    * consecutive unfiltered frames is taken, and its middle : that lands well inside totality
+    * rather than on a diamond ring. Without usable exposure metadata, the middle of the session is
+    * used instead - the maximum of an eclipse is rarely far from it.
+    */
+  def anchorOf(metadata: Seq[ShotMetadata], config: FrameAnalysisConfig): Int =
+    longestRun(unfilteredIndices(metadata, config)) match {
+      case Some(run) => run(run.size / 2)
+      case None      => math.max(0, metadata.size / 2)
+    }
+
+  private def longestRun(indices: Seq[Int]): Option[Vector[Int]] = {
+    val runs    = Vector.newBuilder[Vector[Int]]
+    var current = Vector.empty[Int]
+    indices.sorted.foreach { index =>
+      if (current.isEmpty || index == current.last + 1) current = current :+ index
+      else { runs += current; current = Vector(index) }
+    }
+    if (current.nonEmpty) runs += current
+    runs.result().maxByOption(_.size)
+  }
+
+  /** Walks the session outwards from the anchor, both directions at once, handing the measured
+    * position of each frame over to the next one.
+    */
+  private def walkFromAnchor(
+    paths: Vector[Path],
+    anchorIndex: Int,
+    seedScale: Option[PlateScale],
+    config: FrameAnalysisConfig,
+    onProgress: (Int, Int, FrameAnalysis) => Unit
+  ): Vector[FrameAnalysis] = {
+    val results  = new Array[FrameAnalysis](paths.size)
+    val counter  = AtomicInteger(0)
+    val samples  = scala.collection.mutable.ArrayBuffer.empty[Double]
+    val total    = paths.size
+
+    def currentScale: Option[PlateScale] = samples.synchronized {
+      if (samples.sizeIs >= 5) {
+        val sorted = samples.sorted
+        Some(PlateScale(sorted(sorted.size / 2)))
+      } else seedScale
+    }
+
+    def record(frame: FrameAnalysis): Unit =
+      for {
+        disc <- frame.disc
+        sun  <- frame.sun
+        if disc.phase == FramePhase.Partial && disc.detectionConfidence > 0.5d && disc.obscuration.forall(_ < 0.6d)
+      } samples.synchronized { samples += disc.radiusPixels / sun.semiDiameterDegrees }
+
+    def measureAt(index: Int, prior: Option[FramePrior]): FrameAnalysis = {
+      val frame = Try(analyze(paths(index), config.copy(plateScale = currentScale), prior)) match {
+        case Success(found) => found
+        case Failure(error) =>
+          FrameAnalysis(paths(index), ShotMetadata.empty, None, None, List(s"analysis failed : ${error.getMessage}"))
+      }
+      results(index) = frame
+      record(frame)
+      onProgress(counter.incrementAndGet(), total, frame)
+      frame
+    }
+
+    val anchor = measureAt(anchorIndex, None)
+
+    def walk(step: Int): Unit = {
+      var prior = priorOf(anchor)
+      var index = anchorIndex + step
+      while (index >= 0 && index < paths.size) {
+        val frame = measureAt(index, prior)
+        prior = priorOf(frame).orElse(prior)
+        index += step
+      }
+    }
+
+    // the two directions do not share anything but the plate scale samples, so they run together
+    val executor = Executors.newFixedThreadPool(2)
+    try {
+      val forward  = executor.submit[Unit](() => walk(1))
+      val backward = executor.submit[Unit](() => walk(-1))
+      forward.get()
+      backward.get()
+    } finally {
+      executor.shutdown()
+      executor.awaitTermination(1L, TimeUnit.MINUTES)
+    }
+    results.toVector
+  }
+
+  private def priorOf(frame: FrameAnalysis): Option[FramePrior] =
+    frame.disc.map(disc => FramePrior(disc.centerX, disc.centerY, disc.radiusPixels))
+
+  /** The measurement of the closest already measured neighbour of a frame */
+  private def neighbourPrior(frames: Seq[FrameAnalysis], index: Int): Option[FramePrior] = {
+    val before = frames.take(index).reverse.view.flatMap(priorOf).headOption
+    val after  = frames.drop(index + 1).view.flatMap(priorOf).headOption
+    before.orElse(after)
+  }
+
+  /** Metadata of every frame, read in parallel : no image is decoded here, it is only a few
+    * kilobytes read per file, and it is what decides where the analysis starts from.
+    */
+  private def readAllMetadata(paths: Seq[Path], config: FrameAnalysisConfig): Vector[(Path, ShotMetadata)] = {
+    val executor = Executors.newFixedThreadPool(math.max(1, config.parallelism))
+    try {
+      val futures = paths.map(path => path -> executor.submit[ShotMetadata](() => ExifReader.read(path).getOrElse(ShotMetadata.empty)))
+      futures.map { case (path, future) => path -> future.get() }.toVector
+    } finally {
+      executor.shutdown()
+      executor.awaitTermination(1L, TimeUnit.MINUTES)
+    }
+  }
+
+  /** Decodes the RAW files ahead of the measurements, in the walk order, to keep the cache warm */
+  private def startPrefetching(paths: Vector[Path], anchorIndex: Int, config: FrameAnalysisConfig) = {
+    val executor = Executors.newFixedThreadPool(math.max(1, config.parallelism))
+    val order    = anchorIndex +: (1 until paths.size)
+      .flatMap(offset => List(anchorIndex + offset, anchorIndex - offset))
+      .filter(index => index >= 0 && index < paths.size)
+    order.foreach { index =>
+      executor.submit(new Runnable {
+        def run(): Unit = Try(RawDecoder.decode(paths(index), config.cacheDirectory, config.rawDecode))
+      })
+    }
+    executor
   }
 
   /** Marks as totality the frames shot with the filter removed.
@@ -121,22 +310,16 @@ object FrameAnalyzer {
     * third contact - keeps its measured phase, since its geometry was correctly fitted.
     */
   def withExposurePhases(frames: List[FrameAnalysis], config: FrameAnalysisConfig): List[FrameAnalysis] = {
-    if (!config.phaseFromExposure) frames
-    else {
-      val exposureValues = frames.flatMap(_.metadata.exposureValue).sorted
-      if (exposureValues.sizeIs < 3) frames
-      else {
-        val median = exposureValues(exposureValues.size / 2)
-        frames.map { frame =>
-          val unfiltered = frame.metadata.exposureValue.exists(_ <= median - config.unfilteredExposureDrop)
-          frame.disc match {
-            case Some(disc) if unfiltered && disc.limbContrast < 0.6d =>
-              frame.copy(disc = Some(disc.copy(phase = FramePhase.Totality, obscuration = Some(1d))))
-            case _                                                    => frame
-          }
+    val unfiltered = unfilteredIndices(frames.map(_.metadata), config).toSet
+    if (unfiltered.isEmpty) frames
+    else
+      frames.zipWithIndex.map { case (frame, index) =>
+        frame.disc match {
+          case Some(disc) if unfiltered.contains(index) && disc.limbContrast < 0.6d =>
+            frame.copy(disc = Some(disc.copy(phase = FramePhase.Totality, obscuration = Some(1d))))
+          case _                                                                    => frame
         }
       }
-    }
   }
 
   /** Pixels per degree of the setup, from the frames where the solar limb is best visible */
@@ -179,14 +362,20 @@ object FrameAnalyzer {
     * part of the frame. On a wider shot the disc would end up a few dozen pixels wide and the
     * measurement would get coarse, so the analysis is simply redone on a larger copy.
     */
-  private def measure(image: BufferedImage, config: FrameAnalysisConfig, sun: Option[SunPosition]): Either[String, MeasuredDisc] = {
+  private def measure(
+    image: BufferedImage,
+    config: FrameAnalysisConfig,
+    sun: Option[SunPosition],
+    prior: Option[FramePrior]
+  ): Either[String, MeasuredDisc] = {
     def attempt(analysisMaxSize: Int): Either[String, (DiscDetection, GrayRaster, Double)] = {
       val analysed       = BasicImaging.fitWithin(image, analysisMaxSize)
       val scale          = image.getWidth.toDouble / analysed.getWidth
       val raster         = GrayRaster.fromImage(analysed)
       val detectorConfig = config.detector.copy(
         analysisMaxSize = analysisMaxSize,
-        expectedRadiusPixels = expectedRadiusPixels(config, sun).map(_ / scale)
+        expectedRadiusPixels = expectedRadiusPixels(config, sun).orElse(prior.map(_.radiusPixels)).map(_ / scale),
+        expectedCenter = prior.map(found => (found.centerX / scale, found.centerY / scale))
       )
       DiscDetector.detectOnRaster(raster, detectorConfig).map(detection => (detection, raster, scale))
     }
@@ -258,30 +447,4 @@ object FrameAnalyzer {
         math.max(0d, math.min(1d, inlierRatio * (1d - math.min(1d, residualRatio * 20d))))
     }
 
-  private def runAll(
-    paths: Seq[Path],
-    config: FrameAnalysisConfig,
-    onProgress: (Int, Int, FrameAnalysis) => Unit
-  ): List[FrameAnalysis] = {
-    val total    = paths.size
-    val counter  = AtomicInteger(0)
-    val executor = Executors.newFixedThreadPool(math.max(1, config.parallelism))
-    try {
-      val futures = paths.map { path =>
-        path -> executor.submit[FrameAnalysis] { () =>
-          val analysis = Try(analyze(path, config)) match {
-            case Success(found) => found
-            case Failure(error) =>
-              FrameAnalysis(path, ShotMetadata.empty, None, None, List(s"analysis failed : ${error.getMessage}"))
-          }
-          onProgress(counter.incrementAndGet(), total, analysis)
-          analysis
-        }
-      }
-      futures.map { case (_, future) => future.get() }.toList
-    } finally {
-      executor.shutdown()
-      executor.awaitTermination(1L, TimeUnit.MINUTES)
-    }
-  }
 }
