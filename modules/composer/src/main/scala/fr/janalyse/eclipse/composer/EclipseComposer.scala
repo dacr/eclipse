@@ -31,7 +31,7 @@ object EclipseComposer {
     onProgress: (Int, Int) => Unit = (_, _) => ()
   ): Either[String, ComposeOutcome] = {
     val selection = FrameSelector.select(frames, config.selection)
-    if (selection.kept.isEmpty) Left("no usable frame left after selection")
+    if (selection.kept.isEmpty) Left(s"no usable frame left after selection\n${diagnose(frames)}")
     else {
       val layoutConfig = LayoutConfig(
         pixelsPerDegree = pixelsPerDegree(frames, config),
@@ -96,6 +96,45 @@ object EclipseComposer {
       lines += s"${failures.size} frames could not be measured :"
       failures.take(10).foreach(frame => lines += s"  ${frame.name} : ${frame.issues.mkString(", ")}")
       if (failures.sizeIs > 10) lines += s"  ... and ${failures.size - 10} more"
+    }
+    lines.result().mkString("\n")
+  }
+
+  /** Why the frames cannot be used, counted cause by cause.
+    *
+    * "no usable frame" is a dead end for whoever reads it : a frame is unusable because it has no
+    * date, or no position, or because its disc could not be measured, and each of those has its own
+    * cure. So they are counted separately, with a few examples and the issues met along the way.
+    */
+  def diagnose(frames: Seq[FrameAnalysis]): String = {
+    val lines      = List.newBuilder[String]
+    val unusable   = frames.filterNot(_.isUsable)
+    val noDate     = frames.count(_.shotAt.isEmpty)
+    val noPosition = frames.count(_.metadata.location.isEmpty)
+    val noDisc     = frames.count(_.disc.isEmpty)
+    val doubtful   = frames.count(_.disc.exists(_.detectionConfidence < 0.2d))
+
+    lines += s"${frames.size} frames read, ${frames.count(_.isUsable)} usable"
+    if (noDate > 0) lines += s"  $noDate without a shooting date  -> the sun position cannot be computed"
+    if (noPosition > 0) lines += s"  $noPosition without a position       -> give one with --observer lat,lon"
+    if (noDisc > 0) lines += s"  $noDisc without a measured disc  -> the sun was not found on the image"
+    if (doubtful > 0) lines += s"  $doubtful measured but doubtful    -> dropped by the selection, see --min-confidence"
+
+    val issues = frames.flatMap(_.issues).filter(_.nonEmpty).groupBy(identity).view.mapValues(_.size).toList.sortBy(-_._2)
+    if (issues.nonEmpty) {
+      lines += "what the analysis reported :"
+      issues.take(5).foreach { case (issue, count) => lines += s"  ${count}x $issue" }
+    }
+    if (unusable.nonEmpty) {
+      lines += "for instance :"
+      unusable.take(3).foreach { frame =>
+        val what = List(
+          Option.when(frame.shotAt.isEmpty)("no date"),
+          Option.when(frame.metadata.location.isEmpty)("no position"),
+          Option.when(frame.disc.isEmpty)("no disc")
+        ).flatten.mkString(", ")
+        lines += s"  ${frame.name} : $what"
+      }
     }
     lines.result().mkString("\n")
   }

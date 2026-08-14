@@ -35,6 +35,7 @@ object Main {
       |composition options :
       |  every setting below is worked out from the measurements when it is not given
       |  --no-auto                 keeps the plain defaults instead of the measured settings
+      |  --min-confidence <0..1>   how sure a measurement has to be to be drawn (default : 0.2)
       |  --max-pixels <n>          largest composite to produce (default : 200000000)
       |  --max-side <n>            largest composite side, in pixels (default : 24000)
       |  --layout <name>           sky-path, sky-path-even, timeline, grid
@@ -135,6 +136,7 @@ object Main {
 
       List(
         EclipseComposer.summary(frames),
+        if (frames.exists(_.isUsable)) "" else "\n" + EclipseComposer.diagnose(frames),
         "",
         tuned.explanations.map(explanation => s"automatic             : $explanation").mkString("\n"),
         "",
@@ -222,7 +224,8 @@ object Main {
       selection = SelectionConfig(
         separationFactor = options.double("separation").getOrElse(tuned.selection.separationFactor),
         tileRadiusFactor = options.double("tile-factor").getOrElse(tuned.selection.tileRadiusFactor),
-        totalityTileRadiusFactor = options.double("totality-factor").getOrElse(tuned.selection.totalityTileRadiusFactor)
+        totalityTileRadiusFactor = options.double("totality-factor").getOrElse(tuned.selection.totalityTileRadiusFactor),
+        minimumConfidence = options.double("min-confidence").getOrElse(tuned.selection.minimumConfidence)
       ),
       layout = options.value("layout") match {
         case Some("sky-path-even") => SkyPathLayout(evenSpacing = true)
@@ -342,7 +345,7 @@ object Main {
     private val valuedOptions = Set(
       "out", "cache", "observer", "parallelism", "pressure", "temperature",
       "layout", "disc-radius", "separation", "tile-factor", "totality-factor",
-      "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin"
+      "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin", "min-confidence"
     )
 
     def parse(arguments: List[String]): Options = {

@@ -183,6 +183,41 @@ object Rasters {
 
     def coverage: Double = if (flags.isEmpty) 0d else count.toDouble / flags.length
 
+    /** Bounding box of the mask, as (minimumX, minimumY, maximumX, maximumY) */
+    def bounds: Option[(Int, Int, Int, Int)] = {
+      var minimumX = Int.MaxValue
+      var minimumY = Int.MaxValue
+      var maximumX = Int.MinValue
+      var maximumY = Int.MinValue
+      var y        = 0
+      while (y < height) {
+        var x = 0
+        while (x < width) {
+          if (flags(y * width + x)) {
+            if (x < minimumX) minimumX = x
+            if (x > maximumX) maximumX = x
+            if (y < minimumY) minimumY = y
+            if (y > maximumY) maximumY = y
+          }
+          x += 1
+        }
+        y += 1
+      }
+      if (maximumX < minimumX) None else Some((minimumX, minimumY, maximumX, maximumY))
+    }
+
+    /** How much of the frame the mask spans, horizontally and vertically.
+      *
+      * A round subject stays compact whatever its brightness : anything spanning the whole frame is
+      * not the subject but the sky, the ground, or a flare.
+      */
+    def span: (Double, Double) =
+      bounds match {
+        case None                                          => (0d, 0d)
+        case Some((minimumX, minimumY, maximumX, maximumY)) =>
+          ((maximumX - minimumX + 1).toDouble / width, (maximumY - minimumY + 1).toDouble / height)
+      }
+
     /** Center of gravity of the mask, beware : for a crescent shape this is NOT the disc center */
     def centroid: Option[(Double, Double)] = {
       var totalX = 0d

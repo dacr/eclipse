@@ -29,6 +29,8 @@ object DiscDetector {
     thresholdRatio: Double = 0.35,
     minimumCoverage: Double = 0.000005,
     maximumCoverage: Double = 0.5,
+    /** how much of the frame the subject may span before being taken for sky or landscape */
+    maximumSpanRatio: Double = 0.8,
     /** contrast across the edge, in dynamic range units, above which a limb is considered visible */
     limbContrastThreshold: Double = 0.3,
     /** distance at which the edge contrast is measured, in pixels on each side of the edge */
@@ -85,11 +87,36 @@ object DiscDetector {
     val range      = peak - background
     if (range < 1e-4d) Left("uniform frame, no subject found")
     else {
-      val threshold = background + config.thresholdRatio * range
-      val mask      = raster.brighterThan(threshold)
-      if (mask.coverage < config.minimumCoverage) Left(f"subject too small or too faint (coverage ${mask.coverage}%.8f)")
-      else if (mask.coverage > config.maximumCoverage) Left(f"subject too large, frame is probably overexposed (coverage ${mask.coverage}%.4f)")
-      else {
+      // The threshold is not fixed : a twilight sky, a bright horizon or a landscape in the frame
+      // would put far too much of the image above any preset level, while an underexposed corona
+      // would put too little. Since the subject is always the brightest compact thing around, the
+      // level is raised - or lowered - until what stands out has a plausible size.
+      val ratios   = (config.thresholdRatio +: List(0.5d, 0.65d, 0.8d, 0.9d, 0.96d, 0.2d, 0.1d, 0.05d)).distinct
+      val attempts = ratios.view.map { ratio =>
+        val level = background + ratio * range
+        (level, raster.brighterThan(level))
+      }
+      val found    = attempts.find { case (_, mask) =>
+        val (horizontal, vertical) = mask.span
+        mask.coverage >= config.minimumCoverage &&
+        mask.coverage <= config.maximumCoverage &&
+        horizontal <= config.maximumSpanRatio &&
+        vertical <= config.maximumSpanRatio
+      }
+
+      found match {
+        case None =>
+          val (_, first) = attempts.head
+          val (horizontal, vertical) = first.span
+          if (first.coverage < config.minimumCoverage)
+            Left(f"subject too small or too faint (coverage ${first.coverage}%.8f, ${ratios.size} thresholds tried)")
+          else
+            Left(
+              f"nothing compact stands out of the frame (coverage ${first.coverage}%.4f, " +
+                f"spanning ${horizontal * 100}%.0f%% x ${vertical * 100}%.0f%% of it, ${ratios.size} thresholds tried)"
+            )
+
+        case Some((threshold, mask)) =>
         mask.centroid match {
           case None           => Left("no lit pixel found")
           case Some(centroid) =>

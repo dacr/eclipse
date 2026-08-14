@@ -175,6 +175,24 @@ valeurs par défaut brutes.
 
 ## Les points délicats, et comment ils sont traités
 
+**Quand rien ne marche, savoir pourquoi.** « aucune photo utilisable » ne dit rien à qui
+le lit. Le programme compte donc les causes séparément — sans date, sans position, sans
+disque mesuré, mesure trop douteuse — les classe par fréquence, et donne des exemples :
+
+```
+6 frames read, 0 usable
+  2 without a shooting date  -> the sun position cannot be computed
+  6 without a measured disc  -> the sun was not found on the image
+what the analysis reported :
+  4x disc detection failed : nothing compact stands out of the frame (coverage 0.6231, ...)
+```
+
+**Le seuil de détection n'est pas fixe, et le sujet doit être compact.** Sur un ciel de
+crépuscule, un seuil figé attrape le ciel lui-même et le centre calculé dérive de plus de
+cent pixels. Le niveau est donc relevé — ou abaissé — jusqu'à ce que ce qui ressort ait une
+taille **et une compacité** plausibles : un sujet rond ne traverse pas le cadre, contrairement
+au ciel, au sol ou à une branche.
+
 **Le centre du disque, pas le centre du croissant.** Un simple barycentre des pixels
 éclairés dérive de plusieurs dizaines de pixels dès que l'éclipse avance. On lance donc
 des rayons depuis le barycentre, on relève le dernier point éclairé de chaque rayon, puis
@@ -278,7 +296,7 @@ séquence.
   en cache (`.eclipse-cache`).
 
 ```bash
-sbt test        # 66 tests
+sbt test        # 67 tests
 sbt cli/run     # aide en ligne
 
 # une session d'exemple, pour essayer sans sortir les RAW

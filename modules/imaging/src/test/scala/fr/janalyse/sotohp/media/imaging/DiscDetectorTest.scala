@@ -101,6 +101,36 @@ class DiscDetectorTest extends munit.FunSuite {
     assertEqualsDouble(found.circle.centerY, center._2, 6d)
   }
 
+  test("the sun is still found in a bright twilight sky, with foreground in the frame") {
+    // what a totality frame taken at dusk really looks like : a sky gradient covering the whole
+    // image, dark branches in a corner, and the subject barely brighter than its surroundings
+    val width    = 1500
+    val height   = 1000
+    val image    = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+    val sun      = Circle(640d, 430d, 90d)
+    val graphics = image.createGraphics
+    try {
+      var y = 0
+      while (y < height) {
+        // a bright sky, only a little darker than the subject : this is what makes a fixed
+        // threshold useless, most of the frame sits above it
+        val level = (225 - 60 * y / height).max(10)
+        graphics.setColor(Color(level, level - 4, level + 6))
+        graphics.drawLine(0, y, width, y)
+        y += 1
+      }
+      graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+      graphics.setColor(Color(20, 18, 16)) // a branch across the top of the frame
+      graphics.fillRect(0, 0, width, 90)
+      fill(graphics, sun, Color(252, 248, 240))
+    } finally graphics.dispose()
+
+    val found = DiscDetector.detect(image).fold(error => fail(error), identity)
+    assertEqualsDouble(found.circle.centerX, sun.centerX, 3d)
+    assertEqualsDouble(found.circle.centerY, sun.centerY, 3d)
+    assertEqualsDouble(found.circle.radius, sun.radius, 4d)
+  }
+
   test("the outer limb fit ignores the points lying inside the circle") {
     val truth  = Circle(120d, 90d, 60d)
     val limb   = (0 until 240).map { index =>
