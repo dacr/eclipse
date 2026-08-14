@@ -90,6 +90,30 @@ extension (metadata: ShotMetadata) {
       math.log(aperture * aperture / time) / math.log(2d) - math.log(sensitivity / 100d) / math.log(2d)
     }
 
+  /** Fills the empty fields with the ones of another reading of the same shot.
+    *
+    * A shot often exists as several files - a RAW and the JPEG the camera wrote beside it - and
+    * they do not carry the same metadata : the JPEG is read by everything, while a recent RAW
+    * container may hide its GPS position or its date from most readers. Reading both and completing
+    * one with the other gives the whole picture, and costs nothing.
+    */
+  def completedWith(other: ShotMetadata): ShotMetadata =
+    ShotMetadata(
+      shotAt = metadata.shotAt.orElse(other.shotAt),
+      location = metadata.location.orElse(other.location),
+      cameraName = metadata.cameraName.orElse(other.cameraName),
+      lensName = metadata.lensName.orElse(other.lensName),
+      focalLengthMillimeters = metadata.focalLengthMillimeters.orElse(other.focalLengthMillimeters),
+      aperture = metadata.aperture.orElse(other.aperture),
+      exposureTimeSeconds = metadata.exposureTimeSeconds.orElse(other.exposureTimeSeconds),
+      isoSensitivity = metadata.isoSensitivity.orElse(other.isoSensitivity),
+      imageWidth = metadata.imageWidth.orElse(other.imageWidth),
+      imageHeight = metadata.imageHeight.orElse(other.imageHeight),
+      pixelPitchMicrometers = metadata.pixelPitchMicrometers.orElse(other.pixelPitchMicrometers)
+    )
+
+  def isEmpty: Boolean = metadata == ShotMetadata.empty
+
   /** Plate scale deduced from the optics alone, when the camera recorded enough to compute it.
     *
     * No image needed : it gives the expected size of the solar disc before anything is measured,

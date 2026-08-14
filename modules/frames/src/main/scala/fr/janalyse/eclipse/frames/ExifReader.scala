@@ -3,7 +3,7 @@ package fr.janalyse.eclipse.frames
 import com.drew.imaging.ImageMetadataReader
 import com.drew.metadata.Metadata as DrewMetadata
 import com.drew.metadata.exif.{ExifDirectoryBase, ExifIFD0Directory, ExifSubIFDDirectory, GpsDirectory}
-import fr.janalyse.eclipse.model.{GeoPoint, ShotMetadata}
+import fr.janalyse.eclipse.model.{GeoPoint, ShotMetadata, completedWith}
 
 import java.nio.file.Path
 import java.time.format.DateTimeFormatter
@@ -29,13 +29,31 @@ object ExifReader {
       case Success(metadata) => Right(extract(metadata))
     }
 
+  /** Reads the metadata of a shot from every file that represents it, the first one having the last
+    * word on each field and the others filling the gaps.
+    *
+    * This is what makes a RAW+JPEG pair work : the JPEG hands over the shooting date and the GPS
+    * position that the RAW container keeps to itself, and nothing is lost either way.
+    */
+  def readAll(paths: Seq[Path]): (ShotMetadata, List[String]) = {
+    val issues   = List.newBuilder[String]
+    val readings = paths.flatMap { path =>
+      read(path) match {
+        case Right(found) => Some(found)
+        case Left(error)  => issues += error; None
+      }
+    }
+    val merged   = readings.foldLeft(ShotMetadata.empty)((accumulated, found) => accumulated.completedWith(found))
+    (merged, issues.result())
+  }
+
   def extract(metadata: DrewMetadata): ShotMetadata = {
     val exif    = Option(metadata.getFirstDirectoryOfType(classOf[ExifIFD0Directory]))
     val exifSub = Option(metadata.getFirstDirectoryOfType(classOf[ExifSubIFDDirectory]))
     val gps     = Option(metadata.getFirstDirectoryOfType(classOf[GpsDirectory]))
 
     ShotMetadata(
-      shotAt = shootDateTime(exifSub, gps),
+      shotAt = shootDateTime(exifSub, gps).orElse(anyDateTime(metadata, gps)),
       location = location(gps),
       cameraName = cameraName(exif),
       lensName = exifSub.flatMap(directory => Option(directory.getString(ExifDirectoryBase.TAG_LENS_MODEL))).map(_.trim).filter(_.nonEmpty),
@@ -85,6 +103,37 @@ object ExifReader {
       val offset        = declaredOffset(directory).orElse(offsetFromGps(withSubSecond, gps)).getOrElse(ZoneOffset.UTC)
       withSubSecond.atOffset(offset)
     }
+  }
+
+  /** Last resort shooting date, looked up in every directory of the file.
+    *
+    * A RAW container - a CR3 is a QuickTime file - does not always expose the usual EXIF date where
+    * it is expected, but it does carry a creation date somewhere. Better that than nothing, and it
+    * only ever applies when the standard tag is missing.
+    */
+  private def anyDateTime(metadata: DrewMetadata, gps: Option[GpsDirectory]): Option[OffsetDateTime] = {
+    val wanted = """(?i)(date/?time original|creation date|creation time|date created|create date)""".r
+    val found  = metadata.getDirectories.asScala.iterator
+      .flatMap(_.getTags.asScala)
+      .filter(tag => tag.hasTagName && wanted.findFirstIn(tag.getTagName).isDefined)
+      .flatMap(tag => Option(tag.getDescription))
+      .flatMap(parseAnyDateTime)
+      .toList
+    found.headOption.map { local =>
+      val offset = offsetFromGps(local, gps).getOrElse(ZoneOffset.UTC)
+      local.atOffset(offset)
+    }
+  }
+
+  private def parseAnyDateTime(raw: String): Option[LocalDateTime] = {
+    val cleaned = raw.trim.replaceAll("""\s+""", " ")
+    val formats = List(
+      exifDateTimeFormat,
+      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+      DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss yyyy")
+    )
+    formats.view.flatMap(format => Try(LocalDateTime.parse(cleaned, format)).toOption).headOption
+      .orElse(Try(LocalDateTime.parse(cleaned)).toOption)
   }
 
   private def declaredOffset(directory: ExifSubIFDDirectory): Option[ZoneOffset] =

@@ -92,6 +92,22 @@ Aucun réglage n'est nécessaire : tout est déduit des mesures (voir plus bas).
 sont insensibles à la casse : `.CR3`, `.cr3`, `.Cr3` sont traités de la même façon, comme
 `.JPG` ou `.PNG`.
 
+**Une prise de vue, pas un fichier.** Un boîtier réglé en RAW+JPEG écrit `IMG_1234.CR3`
+et `IMG_1234.JPG` : c'est **une seule photo**. Les fichiers sont donc regroupés par nom
+(même répertoire, même préfixe, casse indifférente) et comptés une fois. Les deux ne sont
+pas interchangeables pour autant :
+
+- les **métadonnées** sont lues dans les deux et fusionnées, le JPEG d'abord : un conteneur
+  RAW récent cache souvent sa position GPS et jusqu'à sa date de prise de vue aux
+  bibliothèques de lecture, alors que le JPEG écrit par le même boîtier les donne sans
+  broncher. Ce qui manque à l'un est comblé par l'autre ;
+- les **pixels** viennent du RAW, meilleure matière, sauf si aucun décodeur n'est installé —
+  le JPEG fait alors très bien l'affaire. `--prefer-jpeg` force ce choix (bien plus rapide
+  pour un premier essai).
+
+Si aucun des deux fichiers ne donne la date, une date de création est cherchée dans
+n'importe quelle section du fichier avant d'abandonner.
+
 **Le GPS manquant n'est pas un problème.** Toutes les photos viennent du même endroit, donc
 une seule position est consolidée pour toute la séance : c'est la **médiane des relevés
 disponibles**, et elle sert à toutes les photos. Une seule photo géolocalisée suffit donc à
@@ -127,6 +143,7 @@ automatic : composite will be about 20200 x 5600 px for a 41.2° x 11.4° field
 | point de départ de l'analyse | une vue de totalité, repérée à l'exposition |
 | identification des vues sans filtre | par l'IL EXIF, comparé à la médiane de la séance |
 | position de l'observateur | médiane des relevés GPS de la séance, appliquée à toutes les photos, y compris celles qui n'en ont pas |
+| regroupement RAW+JPEG | par préfixe de nom ; métadonnées fusionnées, pixels pris sur le RAW quand un décodeur existe |
 | dominante, luminosité, niveau de ciel | mesurés sur chaque photo |
 
 Toute option donnée explicitement l'emporte sur la valeur trouvée ; `--no-auto` revient aux
@@ -261,7 +278,7 @@ séquence.
   en cache (`.eclipse-cache`).
 
 ```bash
-sbt test        # 58 tests
+sbt test        # 66 tests
 sbt cli/run     # aide en ligne
 
 # une session d'exemple, pour essayer sans sortir les RAW

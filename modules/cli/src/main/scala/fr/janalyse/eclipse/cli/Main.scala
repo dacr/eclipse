@@ -2,7 +2,7 @@ package fr.janalyse.eclipse.cli
 
 import fr.janalyse.eclipse.composer.*
 import fr.janalyse.eclipse.composer.FrameSelector.SelectionConfig
-import fr.janalyse.eclipse.frames.{FrameAnalysisConfig, FrameAnalyzer}
+import fr.janalyse.eclipse.frames.{FrameAnalysisConfig, FrameAnalyzer, Shot}
 import fr.janalyse.eclipse.model.{AtmosphericConditions, FrameAnalysis, GeoPoint}
 import fr.janalyse.sotohp.media.imaging.Compositing.BlendMode
 import fr.janalyse.sotohp.media.imaging.{BasicImaging, DiscDetector, RawDecoder}
@@ -28,6 +28,7 @@ object Main {
       |  --observer <lat,lon[,alt]> observer position, needed only when NO frame carries a fix :
       |                            a single fix in the whole session places all the others
       |  --parallelism <n>         number of frames analyzed at once (default : 2)
+      |  --prefer-jpeg             measures and draws from the JPEG of a RAW+JPEG pair
       |  --pressure <hPa>          atmospheric pressure, for the refraction (default : 1010)
       |  --temperature <°C>        temperature, for the refraction (default : 15)
       |
@@ -78,6 +79,11 @@ object Main {
       _      <- Either.cond(inputs.nonEmpty, (), "no image found")
     } yield {
       val started  = System.currentTimeMillis()
+      val shots    = Shot.group(inputs)
+      Console.err.println(
+        s"${inputs.size} files, ${shots.size} shots" +
+          (if (shots.count(_.hasBoth) > 0) s" (${shots.count(_.hasBoth)} as RAW+JPEG pairs)" else "")
+      )
       val session  = FrameAnalyzer.analyzeAll(
         inputs,
         analysisConfig(options),
@@ -88,6 +94,8 @@ object Main {
       val elapsed  = Duration.ofMillis(System.currentTimeMillis() - started)
       List(
         EclipseComposer.summary(session.frames),
+        s"shots                 : ${shots.size} from ${inputs.size} files" +
+          (if (shots.exists(_.hasBoth)) s", ${shots.count(_.hasBoth)} of them written as RAW+JPEG" else ""),
         s"position              : ${session.location.describe}",
         if (session.location.looksMoved()) f"warning               : the fixes are spread over ${session.location.spreadMeters}%.0f m, was the camera moved ?" else "",
         session.anchor.map(frame => s"analysis started from : ${frame.name}").getOrElse(""),
@@ -190,6 +198,7 @@ object Main {
         temperatureCelsius = options.double("temperature").getOrElse(15d)
       ),
       observer = options.observer,
+      preferRawPixels = !options.flag("prefer-jpeg"),
       parallelism = options.int("parallelism").getOrElse(2)
     )
 

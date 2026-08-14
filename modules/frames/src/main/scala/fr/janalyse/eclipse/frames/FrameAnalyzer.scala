@@ -34,6 +34,10 @@ final case class FrameAnalysisConfig(
   minimumAnalysisDiscRadiusPixels: Double = 80d,
   /** upper bound of the adaptive analysis resolution, memory wise */
   maximumAnalysisSize: Int = 4000,
+  /** measure and draw from the RAW file when a shot also exists as a JPEG, provided a converter is
+    * installed - the JPEG is used otherwise, and does the job perfectly well
+    */
+  preferRawPixels: Boolean = true,
   /** use the exposure metadata to tell the unfiltered frames - the totality ones - apart */
   phaseFromExposure: Boolean = true,
   /** how many stops below the session median an exposure has to be to mean "filter removed" :
@@ -69,14 +73,27 @@ object FrameAnalyzer {
 
   def analyze(
     path: Path,
+    config: FrameAnalysisConfig,
+    prior: Option[FramePrior]
+  ): FrameAnalysis = analyzeShot(Shot.of(path), config, prior)
+
+  def analyze(path: Path, config: FrameAnalysisConfig): FrameAnalysis = analyzeShot(Shot.of(path), config, None)
+
+  def analyze(path: Path): FrameAnalysis = analyzeShot(Shot.of(path), FrameAnalysisConfig(), None)
+
+  /** Measures one shot : its metadata comes from all of its files, its pixels from the best one */
+  def analyzeShot(
+    shot: Shot,
     config: FrameAnalysisConfig = FrameAnalysisConfig(),
     prior: Option[FramePrior] = None
   ): FrameAnalysis = {
-    val issues   = List.newBuilder[String]
-    val metadata = ExifReader.read(path) match {
-      case Right(found) => found
-      case Left(error)  => issues += error; ShotMetadata.empty
-    }
+    val issues                     = List.newBuilder[String]
+    val (metadata, metadataIssues) = ExifReader.readAll(shot.metadataSources)
+    // when a shot is written as RAW+JPEG, one of the two often refuses to be read - a recent RAW
+    // container is not understood by every reader. That is only worth reporting if the other file
+    // did not make up for it : a shot that knows when and where it was taken has no problem.
+    if (metadata.shotAt.isEmpty || metadata.location.isEmpty) metadataIssues.foreach(issues += _)
+    val path                       = shot.pixelSource(config.preferRawPixels && rawDecodingAvailable(config))
 
     // the session position, when there is one, is preferred over the fix of this very frame : the
     // camera did not move, so the consolidated position is the more trustworthy of the two
@@ -107,11 +124,11 @@ object FrameAnalyzer {
         }
     }
 
-    // the metadata of a RAW file does not always carry the dimensions of the decoded image, and the
-    // automatic tuning needs them to know how much room there is around the sun in each frame
+    // the dimensions are those of the image actually measured : a shot may also exist as a smaller
+    // JPEG, whose EXIF dimensions would make the room around the sun look different than it is
     val withDimensions = metadata.copy(
-      imageWidth = metadata.imageWidth.orElse(dimensions.map(_._1)),
-      imageHeight = metadata.imageHeight.orElse(dimensions.map(_._2)),
+      imageWidth = dimensions.map(_._1).orElse(metadata.imageWidth),
+      imageHeight = dimensions.map(_._2).orElse(metadata.imageHeight),
       location = location
     )
 
@@ -140,9 +157,11 @@ object FrameAnalyzer {
     onProgress: (Int, Int, FrameAnalysis) => Unit = (_, _, _) => ()
   ): SessionAnalysis = {
     Files.createDirectories(config.cacheDirectory)
-    if (paths.isEmpty) SessionAnalysis(Nil, None, SessionLocation.consolidate(Nil, config.observer), 0)
+    // a shot written as RAW+JPEG is one shot, not two : the files are grouped by name first
+    val shots = Shot.group(paths)
+    if (shots.isEmpty) SessionAnalysis(Nil, None, SessionLocation.consolidate(Nil, config.observer), 0)
     else {
-      val metadata    = readAllMetadata(paths, config)
+      val metadata    = readAllMetadata(shots, config)
       val ordered     = metadata.sortBy { case (_, found) => found.shotAt.map(_.toInstant.toEpochMilli).getOrElse(0L) }
       val anchorIndex = anchorOf(ordered.map(_._2), config)
       val seedScale   = config.plateScale.orElse(ordered.flatMap(_._2.opticalPlateScale).headOption)
@@ -168,11 +187,12 @@ object FrameAnalyzer {
           // one last look at the frames whose fit stayed doubtful, this time with the plate scale
           // of the session and with the neighbours already measured
           val refinedConfig = located.copy(plateScale = Some(scale))
+          val byPath        = ordered.map { case (shot, _) => shot.pixelSource(config.preferRawPixels && rawDecodingAvailable(config)) -> shot }.toMap
           val refined       = measured.zipWithIndex.map { case (frame, index) =>
             if (!needsRefinement(frame, scale)) frame
             else {
               val prior = neighbourPrior(measured, index)
-              val again = analyze(frame.path, refinedConfig, prior)
+              val again = byPath.get(frame.path).map(shot => analyzeShot(shot, refinedConfig, prior)).getOrElse(frame)
               if (again.disc.isDefined) again else frame
             }
           }
@@ -236,16 +256,16 @@ object FrameAnalyzer {
     * position of each frame over to the next one.
     */
   private def walkFromAnchor(
-    paths: Vector[Path],
+    shots: Vector[Shot],
     anchorIndex: Int,
     seedScale: Option[PlateScale],
     config: FrameAnalysisConfig,
     onProgress: (Int, Int, FrameAnalysis) => Unit
   ): Vector[FrameAnalysis] = {
-    val results  = new Array[FrameAnalysis](paths.size)
+    val results  = new Array[FrameAnalysis](shots.size)
     val counter  = AtomicInteger(0)
     val samples  = scala.collection.mutable.ArrayBuffer.empty[Double]
-    val total    = paths.size
+    val total    = shots.size
 
     def currentScale: Option[PlateScale] = samples.synchronized {
       if (samples.sizeIs >= 5) {
@@ -262,10 +282,10 @@ object FrameAnalyzer {
       } samples.synchronized { samples += disc.radiusPixels / sun.semiDiameterDegrees }
 
     def measureAt(index: Int, prior: Option[FramePrior]): FrameAnalysis = {
-      val frame = Try(analyze(paths(index), config.copy(plateScale = currentScale), prior)) match {
+      val frame = Try(analyzeShot(shots(index), config.copy(plateScale = currentScale), prior)) match {
         case Success(found) => found
         case Failure(error) =>
-          FrameAnalysis(paths(index), ShotMetadata.empty, None, None, List(s"analysis failed : ${error.getMessage}"))
+          FrameAnalysis(shots(index).files.head, ShotMetadata.empty, None, None, List(s"analysis failed : ${error.getMessage}"))
       }
       results(index) = frame
       record(frame)
@@ -278,7 +298,7 @@ object FrameAnalyzer {
     def walk(step: Int): Unit = {
       var prior = priorOf(anchor)
       var index = anchorIndex + step
-      while (index >= 0 && index < paths.size) {
+      while (index >= 0 && index < shots.size) {
         val frame = measureAt(index, prior)
         prior = priorOf(frame).orElse(prior)
         index += step
@@ -312,11 +332,11 @@ object FrameAnalyzer {
   /** Metadata of every frame, read in parallel : no image is decoded here, it is only a few
     * kilobytes read per file, and it is what decides where the analysis starts from.
     */
-  private def readAllMetadata(paths: Seq[Path], config: FrameAnalysisConfig): Vector[(Path, ShotMetadata)] = {
+  private def readAllMetadata(shots: Seq[Shot], config: FrameAnalysisConfig): Vector[(Shot, ShotMetadata)] = {
     val executor = Executors.newFixedThreadPool(math.max(1, config.parallelism))
     try {
-      val futures = paths.map(path => path -> executor.submit[ShotMetadata](() => ExifReader.read(path).getOrElse(ShotMetadata.empty)))
-      futures.map { case (path, future) => path -> future.get() }.toVector
+      val futures = shots.map(shot => shot -> executor.submit[ShotMetadata](() => ExifReader.readAll(shot.metadataSources)._1))
+      futures.map { case (shot, future) => shot -> future.get() }.toVector
     } finally {
       executor.shutdown()
       executor.awaitTermination(1L, TimeUnit.MINUTES)
@@ -324,18 +344,30 @@ object FrameAnalyzer {
   }
 
   /** Decodes the RAW files ahead of the measurements, in the walk order, to keep the cache warm */
-  private def startPrefetching(paths: Vector[Path], anchorIndex: Int, config: FrameAnalysisConfig) = {
+  private def startPrefetching(shots: Vector[Shot], anchorIndex: Int, config: FrameAnalysisConfig) = {
     val executor = Executors.newFixedThreadPool(math.max(1, config.parallelism))
-    val order    = anchorIndex +: (1 until paths.size)
+    val preferRaw = config.preferRawPixels && rawDecodingAvailable(config)
+    val order     = anchorIndex +: (1 until shots.size)
       .flatMap(offset => List(anchorIndex + offset, anchorIndex - offset))
-      .filter(index => index >= 0 && index < paths.size)
+      .filter(index => index >= 0 && index < shots.size)
     order.foreach { index =>
-      executor.submit(new Runnable {
-        def run(): Unit = Try(RawDecoder.decode(paths(index), config.cacheDirectory, config.rawDecode))
-      })
+      val path = shots(index).pixelSource(preferRaw)
+      if (RawDecoder.isRawFile(path)) {
+        executor.submit(new Runnable {
+          def run(): Unit = Try(RawDecoder.decode(path, config.cacheDirectory, config.rawDecode))
+        })
+      }
     }
     executor
   }
+
+  /** Whether a RAW converter is installed, computed once : without one, the JPEG of a shot is used */
+  private lazy val availableTools = scala.collection.mutable.Map.empty[String, Boolean]
+
+  private def rawDecodingAvailable(config: FrameAnalysisConfig): Boolean =
+    availableTools.synchronized {
+      availableTools.getOrElseUpdate(config.rawDecode.signature, RawDecoder.availableTools(config.rawDecode).nonEmpty)
+    }
 
   /** Marks as totality the frames shot with the filter removed.
     *
