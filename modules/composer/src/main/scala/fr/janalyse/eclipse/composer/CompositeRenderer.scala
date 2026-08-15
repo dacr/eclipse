@@ -298,18 +298,18 @@ object CompositeRenderer {
     // the sky is not black : at a total eclipse it is a twilight sky, with a gradient and a color
     // of its own. Measured on a ring drawn where the subject is not, and subtracted, so that the
     // tiles do not show up as bright patches on the composite.
+    //
+    // Channel by channel during totality, where the corona stands far above the sky and taking its
+    // color away can only help. Not on a filtered frame though : there the sun sets into the haze
+    // and ends up barely brighter than the glow around it, so a per channel subtraction would be
+    // left deciding the color of what survives - and it decides blue.
     val raster =
-      if (!config.subtractSkyBackground) loaded
-      else {
-        val innerRadius = phase match {
-          case FramePhase.Totality => halfSize * 0.85d // the corona spreads far, stay at the very edge
-          case _                   => math.min(halfSize * 0.85d, discRadiusPixels * 1.3d)
-        }
+      if (!config.subtractSkyBackground || phase != FramePhase.Totality) loaded
+      else
         DiscMeasures
-          .medianColorInRing(loaded, Circle(halfSize, halfSize, 0d), innerRadius, halfSize)
+          .medianColorInRing(loaded, Circle(halfSize, halfSize, 0d), halfSize * 0.85d, halfSize)
           .map(levels => ColorBalance.removeBackground(loaded, levels))
           .getOrElse(loaded)
-      }
 
     phase match {
       case FramePhase.Totality =>
@@ -319,16 +319,17 @@ object CompositeRenderer {
         stretched.toImage
 
       case _ =>
-        // Subtracting the sky level leaves its grain and its gradient behind, and the brightness
-        // normalization that follows would multiply those along with the disc - the more so as the
-        // sun gets low and dim. Anything still within the wavering of the sky is therefore clipped
-        // away first : past the limb, a filtered frame holds nothing worth keeping anyway.
+        // The sky glow is taken off the brightness alone, so that the disc keeps the color it was
+        // photographed with - orange when it sets in the haze - and everything that stays within
+        // the wavering of the sky goes to black. Past the limb a filtered frame holds nothing worth
+        // keeping anyway, while the grain left behind would be multiplied along with the disc by
+        // the normalization that follows, the more so as the sun gets low and dim.
         val cleaned =
           if (!config.subtractSkyBackground) raster
           else
             DiscMeasures
               .luminancePercentilesInRing(raster, Circle(halfSize, halfSize, 0d), discRadiusPixels * 1.15d, halfSize, List(0.98d))
-              .map(levels => ColorBalance.removeBackground(raster, levels.head))
+              .map(levels => ColorBalance.removeBackgroundPreservingHue(raster, levels.head))
               .getOrElse(raster)
 
         // The reference is the brightness of the photosphere itself, read on the lit pixels alone.
@@ -339,12 +340,21 @@ object CompositeRenderer {
         val litLevel         = math.max(0.01d, gray.percentile(0.9999d) * 0.5d)
         val photosphereLevel = gray.medianAbove(litLevel).getOrElse(gray.percentile(0.999d))
 
+        // A frame given a stop too much - or shot without its filter, as the last ones of a session
+        // often are - has the middle of its disc blown : red and green stopped at the maximum while
+        // blue, lower to begin with, still has room. Nothing there says what color the sun was, and
+        // asking for a neutral disc then pushes blue above red and turns the sun violet. Where the
+        // sensor ran out of range the correction is therefore let go ; where it did not, which is
+        // every properly exposed frame, nothing changes.
+        val whitePoint = cleaned.maximumChannel
+        val knee       = if (loaded.maximumChannel < 0.99f) 1d else whitePoint * 0.9d
+
         val neutralized =
           if (!config.neutralizeColorCast) cleaned
           else
             DiscMeasures
-              .meanColorWithin(cleaned, disc, litLevel)
-              .map(reference => ColorBalance.neutralizeFrom(cleaned, reference, config.discColor))
+              .whitestColorWithin(cleaned, disc, litLevel)
+              .map(reference => ColorBalance.neutralizeFrom(cleaned, reference, config.discColor, highlightKnee = knee))
               .getOrElse(cleaned)
 
         val normalized =

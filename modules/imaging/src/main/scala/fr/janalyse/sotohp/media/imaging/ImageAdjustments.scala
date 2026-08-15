@@ -31,12 +31,40 @@ object ToneMapping {
   def scaleExposure(raster: RgbRaster, factor: Double): RgbRaster =
     raster.mapChannels(value => (value * factor).toFloat)
 
+  /** Multiplies every channel, but never past the point where a channel would clip.
+    *
+    * Clipping a channel changes the color : brighten a deep red sun enough and its red channel
+    * stops at the maximum while green and blue keep climbing, so the middle of the disc turns pale,
+    * then white, then faintly blue - a sunset rendered as a snowball. Scaling the whole pixel by
+    * whatever room its strongest channel has left keeps the ratios, hence the hue : the disc
+    * saturates in brightness, as it must, but stays the color it was photographed.
+    */
+  def scaleExposurePreservingHue(raster: RgbRaster, factor: Double): RgbRaster = {
+    val size     = raster.size
+    val newRed   = Array.ofDim[Float](size)
+    val newGreen = Array.ofDim[Float](size)
+    val newBlue  = Array.ofDim[Float](size)
+    var index    = 0
+    while (index < size) {
+      val red      = raster.red(index)
+      val green    = raster.green(index)
+      val blue     = raster.blue(index)
+      val strongest = math.max(red, math.max(green, blue))
+      val applied   = if (strongest * factor > 1d) 1d / strongest else factor
+      newRed(index) = (red * applied).toFloat
+      newGreen(index) = (green * applied).toFloat
+      newBlue(index) = (blue * applied).toFloat
+      index += 1
+    }
+    RgbRaster(raster.width, raster.height, newRed, newGreen, newBlue)
+  }
+
   /** Brings a reference level (typically the median brightness of the solar disc) onto a target
     * value. This is what makes a whole sequence look consistent despite exposure changes.
     */
   def normalizeReferenceLevel(raster: RgbRaster, referenceLevel: Double, targetLevel: Double): RgbRaster =
     if (referenceLevel <= 1e-6d) raster
-    else scaleExposure(raster, targetLevel / referenceLevel)
+    else scaleExposurePreservingHue(raster, targetLevel / referenceLevel)
 
   def gammaCorrect(raster: RgbRaster, gamma: Double): RgbRaster = {
     val inverse = 1d / math.max(1e-6d, gamma)
@@ -63,6 +91,47 @@ object ColorBalance {
     RgbRaster(raster.width, raster.height, newRed, newGreen, newBlue)
   }
 
+  /** Applies per channel gains, fading them out where the pixel is saturated.
+    *
+    * A blown highlight has no color left to correct. When the sun is photographed without its
+    * filter, or a stop too long, the middle of the disc reaches the maximum in red and green while
+    * blue stops short of it - not because the sun is that color there, but because two channels ran
+    * out of room. Applying a cast correction to such a pixel - red down, blue up, as a warm frame
+    * calls for - swaps the order of its channels and the disc comes out violet.
+    *
+    * So the correction fades away as a pixel approaches the maximum, and vanishes at it : what was
+    * recorded as the brightest thing in the frame stays the brightest thing in the frame, with the
+    * color it was given. Everything below the knee is corrected in full, which is the whole disc on
+    * a properly exposed frame.
+    */
+  def applyGainsProtectingHighlights(
+    raster: RgbRaster,
+    redGain: Double,
+    greenGain: Double,
+    blueGain: Double,
+    highlightKnee: Double = 0.9d
+  ): RgbRaster = {
+    val size     = raster.size
+    val newRed   = Array.ofDim[Float](size)
+    val newGreen = Array.ofDim[Float](size)
+    val newBlue  = Array.ofDim[Float](size)
+    val headroom = math.max(1e-6d, 1d - highlightKnee)
+    var index    = 0
+    while (index < size) {
+      val red       = raster.red(index)
+      val green     = raster.green(index)
+      val blue      = raster.blue(index)
+      val strongest = math.max(red, math.max(green, blue))
+      val protection = math.max(0d, math.min(1d, (strongest - highlightKnee) / headroom))
+      def faded(gain: Double): Double = gain * (1d - protection) + protection
+      newRed(index) = (red * faded(redGain)).toFloat
+      newGreen(index) = (green * faded(greenGain)).toFloat
+      newBlue(index) = (blue * faded(blueGain)).toFloat
+      index += 1
+    }
+    RgbRaster(raster.width, raster.height, newRed, newGreen, newBlue)
+  }
+
   /** Neutralizes a color cast from a measured reference color.
     *
     * A very dense solar filter (ND100000 and beyond) gives a strong and filter dependent cast, this
@@ -77,11 +146,17 @@ object ColorBalance {
     * along with the sky and the noise, and the frame comes out blue with a green crescent in it.
     * Past the bound, the correction is simply left incomplete : a low sun is meant to look warm.
     */
+  /** @param highlightKnee level above which the correction fades out, 1 to correct everything.
+    *
+    * Worth setting below 1 only when the frame is known to hold blown highlights : their color was
+    * not recorded, so correcting it invents one. See [[applyGainsProtectingHighlights]].
+    */
   def neutralizeFrom(
     raster: RgbRaster,
     reference: (Double, Double, Double),
     target: (Double, Double, Double) = (1d, 1d, 1d),
-    maximumGain: Double = 2.5d
+    maximumGain: Double = 2.5d,
+    highlightKnee: Double = 1d
   ): RgbRaster = {
     val (referenceRed, referenceGreen, referenceBlue) = reference
     val (targetRed, targetGreen, targetBlue)          = target
@@ -89,11 +164,12 @@ object ColorBalance {
     else {
       val referenceMean = (referenceRed + referenceGreen + referenceBlue) / 3d
       def bounded(gain: Double): Double = math.max(1d / maximumGain, math.min(maximumGain, gain))
-      applyGains(
+      applyGainsProtectingHighlights(
         raster,
         redGain = bounded(targetRed * referenceMean / referenceRed),
         greenGain = bounded(targetGreen * referenceMean / referenceGreen),
-        blueGain = bounded(targetBlue * referenceMean / referenceBlue)
+        blueGain = bounded(targetBlue * referenceMean / referenceBlue),
+        highlightKnee = highlightKnee
       )
     }
   }
@@ -102,8 +178,40 @@ object ColorBalance {
   def removeBackground(raster: RgbRaster, level: Double): RgbRaster =
     raster.mapChannels(value => math.max(0d, value - level).toFloat)
 
+  /** Removes a background level without touching the color of what is left.
+    *
+    * Subtracting a level from each channel on its own changes the hue of everything dim : take the
+    * deep red glow around a sun setting in the haze, subtract a level of the same order, and what
+    * survives is whichever channel happened to be relatively less absorbed - blue. Brighten that
+    * afterwards, as the brightness normalization does, and a red sun comes out lavender.
+    *
+    * So the level is taken off the luminance instead, and the three channels are scaled by the same
+    * factor : anything at or below the background goes to black, anything above keeps its color and
+    * loses exactly the background brightness.
+    */
+  def removeBackgroundPreservingHue(raster: RgbRaster, level: Double): RgbRaster = {
+    val size     = raster.size
+    val newRed   = Array.ofDim[Float](size)
+    val newGreen = Array.ofDim[Float](size)
+    val newBlue  = Array.ofDim[Float](size)
+    var index    = 0
+    while (index < size) {
+      val luminance = raster.luminance(index)
+      val factor    = if (luminance <= level) 0d else (luminance - level) / luminance
+      newRed(index) = (raster.red(index) * factor).toFloat
+      newGreen(index) = (raster.green(index) * factor).toFloat
+      newBlue(index) = (raster.blue(index) * factor).toFloat
+      index += 1
+    }
+    RgbRaster(raster.width, raster.height, newRed, newGreen, newBlue)
+  }
+
   /** Removes a background level channel by channel : a twilight sky is neither neutral nor uniform
     * in color, subtracting a single level would leave a colored haze behind.
+    *
+    * Only worth it when what is left is bright compared with the background - the corona at
+    * totality. On a dim subject use [[removeBackgroundPreservingHue]], which does not let the
+    * subtraction decide the color.
     */
   def removeBackground(raster: RgbRaster, levels: (Double, Double, Double)): RgbRaster = {
     val (redLevel, greenLevel, blueLevel) = levels

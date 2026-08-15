@@ -96,6 +96,61 @@ object DiscMeasures {
     if (count == 0L) None else Some((totalRed / count, totalGreen / count, totalBlue / count))
   }
 
+  /** Mean color of the least tinted part of the disc.
+    *
+    * The base of a color correction has to be a color the disc actually has somewhere, and when the
+    * disc is not all one color it has to be the *least* tinted one. A sun setting in the haze is
+    * not one color : its lower limb is deeply reddened while its upper one is still nearly white,
+    * and neutralizing the average of the two over-corrects the white half - blue ends up above red
+    * and the sun comes out violet. Neutralizing the whitest part instead cannot push anything past
+    * neutral, since that part is the closest to neutral to begin with.
+    *
+    * "Whitest" is read as the highest blue over red ratio, blue being what a warm cast takes away
+    * first, and the mean is taken over that fraction of the lit pixels rather than over one of
+    * them, so that noise does not get to decide. On a uniformly tinted disc - a filtered frame,
+    * which is most of a session - every pixel has the same ratio and this is just the mean color.
+    */
+  def whitestColorWithin(
+    raster: RgbRaster,
+    circle: Circle,
+    minimumLevel: Double = 0.02d,
+    fraction: Double = 0.1d
+  ): Option[(Double, Double, Double)] = {
+    val candidates = Array.newBuilder[Int]
+    val minimumX   = math.max(0, math.floor(circle.centerX - circle.radius).toInt)
+    val maximumX   = math.min(raster.width - 1, math.ceil(circle.centerX + circle.radius).toInt)
+    val minimumY   = math.max(0, math.floor(circle.centerY - circle.radius).toInt)
+    val maximumY   = math.min(raster.height - 1, math.ceil(circle.centerY + circle.radius).toInt)
+    var y          = minimumY
+    while (y <= maximumY) {
+      var x = minimumX
+      while (x <= maximumX) {
+        if (circle.distanceToCenter(x, y) <= circle.radius) {
+          val index = y * raster.width + x
+          if (raster.luminance(index) > minimumLevel) candidates += index
+        }
+        x += 1
+      }
+      y += 1
+    }
+
+    val lit = candidates.result()
+    if (lit.isEmpty) None
+    else {
+      def whiteness(index: Int): Double = {
+        val red = raster.red(index)
+        if (red <= 1e-6f) Double.MaxValue else raster.blue(index) / red
+      }
+      val kept  = lit.sortBy(-whiteness(_)).take(math.max(1, (lit.length * fraction).toInt))
+      val count = kept.length.toDouble
+      Some((
+        kept.map(index => raster.red(index).toDouble).sum / count,
+        kept.map(index => raster.green(index).toDouble).sum / count,
+        kept.map(index => raster.blue(index).toDouble).sum / count
+      ))
+    }
+  }
+
   /** How far the subject actually shines, in pixels from its center.
     *
     * The brightness is averaged over concentric rings, and the returned radius is the one where it

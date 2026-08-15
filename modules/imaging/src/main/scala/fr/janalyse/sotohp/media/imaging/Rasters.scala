@@ -301,6 +301,24 @@ object Rasters {
       GrayRaster(width, height, values)
     }
 
+    /** The highest value reached by any channel of any pixel : the white point of this raster.
+      *
+      * Told apart from the luminance percentiles because it answers a different question - not how
+      * bright the subject is, but whether a channel ran out of room, which is what makes the color
+      * of a highlight unrecoverable.
+      */
+    def maximumChannel: Float = {
+      var highest = 0f
+      var index   = 0
+      while (index < size) {
+        if (red(index) > highest) highest = red(index)
+        if (green(index) > highest) highest = green(index)
+        if (blue(index) > highest) highest = blue(index)
+        index += 1
+      }
+      highest
+    }
+
     /** Applies the given function to every channel of every pixel */
     def mapChannels(transform: Float => Float): RgbRaster = {
       val newRed   = Array.ofDim[Float](size)
