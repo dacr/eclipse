@@ -93,7 +93,7 @@ object FrameAnalyzer {
     // container is not understood by every reader. That is only worth reporting if the other file
     // did not make up for it : a shot that knows when and where it was taken has no problem.
     if (metadata.shotAt.isEmpty || metadata.location.isEmpty) metadataIssues.foreach(issues += _)
-    val path                       = shot.pixelSource(config.preferRawPixels && rawDecodingAvailable(config))
+    val candidates                 = shot.pixelSources(config.preferRawPixels && rawDecodingAvailable(config))
 
     // the session position, when there is one, is preferred over the fix of this very frame : the
     // camera did not move, so the consolidated position is the more trustworthy of the two
@@ -108,24 +108,33 @@ object FrameAnalyzer {
       observer <- location
     } yield SolarEphemeris.position(shotAt.toInstant, observer, config.atmosphere)
 
-    var dimensions: Option[(Int, Int)] = None
-
-    val disc = RawDecoder.load(path, config.cacheDirectory, config.rawDecode) match {
-      case Left(error)  =>
-        issues += error
-        None
-      case Right(image) =>
-        dimensions = Some((image.getWidth, image.getHeight))
-        measure(image, config, sun, prior) match {
-          case Left(error) =>
-            issues += s"disc detection failed : $error"
+    // the preferred file is tried first, and the others are there in case it cannot be read at all
+    val loaded = candidates.foldLeft(Option.empty[(Path, java.awt.image.BufferedImage)]) { (found, candidate) =>
+      found.orElse {
+        RawDecoder.load(candidate, config.cacheDirectory, config.rawDecode) match {
+          case Right(image) =>
+            if (candidate != candidates.head) issues += s"${candidates.head.getFileName} could not be read, ${candidate.getFileName} used instead"
+            Some((candidate, image))
+          case Left(error)  =>
+            issues += error
             None
-          case Right(disc) => Some(disc)
         }
+      }
+    }
+
+    val path = loaded.map(_._1).getOrElse(candidates.head)
+    val disc = loaded.flatMap { case (_, image) =>
+      measure(image, config, sun, prior) match {
+        case Left(error) =>
+          issues += s"disc detection failed : $error"
+          None
+        case Right(disc) => Some(disc)
+      }
     }
 
     // the dimensions are those of the image actually measured : a shot may also exist as a smaller
     // JPEG, whose EXIF dimensions would make the room around the sun look different than it is
+    val dimensions     = loaded.map { case (_, image) => (image.getWidth, image.getHeight) }
     val withDimensions = metadata.copy(
       imageWidth = dimensions.map(_._1).orElse(metadata.imageWidth),
       imageHeight = dimensions.map(_._2).orElse(metadata.imageHeight),
@@ -369,25 +378,12 @@ object FrameAnalyzer {
       availableTools.getOrElseUpdate(config.rawDecode.signature, RawDecoder.availableTools(config.rawDecode).nonEmpty)
     }
 
-  /** Marks as totality the frames shot with the filter removed.
-    *
-    * The exposure tells it far better than the image does : an eclipse session has two very
-    * distinct exposure families, and everything far below the main one was shot bare lens. A frame
-    * showing an unmistakable limb - the diamond ring, the first seconds of the partial phase after
-    * third contact - keeps its measured phase, since its geometry was correctly fitted.
+  /** The exposure no longer decides the phase : the detector has the image in front of it, and a
+    * dark middle inside a ring of light is a far better sign of totality than a low exposure value,
+    * which a low sun without its filter shows just as well. What the exposure is still good for is
+    * saying where to start the analysis from.
     */
-  def withExposurePhases(frames: List[FrameAnalysis], config: FrameAnalysisConfig): List[FrameAnalysis] = {
-    val unfiltered = unfilteredIndices(frames.map(_.metadata), config).toSet
-    if (unfiltered.isEmpty) frames
-    else
-      frames.zipWithIndex.map { case (frame, index) =>
-        frame.disc match {
-          case Some(disc) if unfiltered.contains(index) && disc.limbContrast < 0.6d =>
-            frame.copy(disc = Some(disc.copy(phase = FramePhase.Totality, obscuration = Some(1d))))
-          case _                                                                    => frame
-        }
-      }
-  }
+  def withExposurePhases(frames: List[FrameAnalysis], config: FrameAnalysisConfig): List[FrameAnalysis] = frames
 
   /** Pixels per degree of the setup, from the frames where the solar limb is best visible */
   def estimatePlateScale(frames: Seq[FrameAnalysis]): Option[PlateScale] = {
@@ -509,9 +505,12 @@ object FrameAnalyzer {
     detection.kind match {
       case DiscKind.Corona      => 0.4d
       case DiscKind.Photosphere =>
-        val inlierRatio  = if (detection.boundaryPointCount == 0) 0d else detection.inlierCount.toDouble / detection.boundaryPointCount
-        val residualRatio = if (detection.circle.radius <= 0d) 1d else detection.residualRms / detection.circle.radius
-        math.max(0d, math.min(1d, inlierRatio * (1d - math.min(1d, residualRatio * 20d))))
+        // the spread of the points around their own circle, not their distance to the radius the
+        // session imposes : a frame whose disc looks a little smaller - a darker exposure cuts the
+        // limb darkening earlier - is measured just as well, and its center is what gets used
+        val inlierRatio = if (detection.boundaryPointCount == 0) 0d else detection.inlierCount.toDouble / detection.boundaryPointCount
+        val spreadRatio = if (detection.circle.radius <= 0d) 1d else detection.radialSpread / detection.circle.radius
+        math.max(0d, math.min(1d, inlierRatio * (1d - math.min(1d, spreadRatio * 20d))))
     }
 
 }

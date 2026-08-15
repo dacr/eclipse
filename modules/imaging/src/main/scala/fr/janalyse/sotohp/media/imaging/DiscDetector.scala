@@ -31,11 +31,13 @@ object DiscDetector {
     maximumCoverage: Double = 0.5,
     /** how much of the frame the subject may span before being taken for sky or landscape */
     maximumSpanRatio: Double = 0.8,
-    /** contrast across the edge, in dynamic range units, above which a limb is considered visible */
-    limbContrastThreshold: Double = 0.3,
+    /** how much of the brightness fall must happen right at the edge for a limb to be seen there */
+    limbContrastThreshold: Double = 0.6,
     /** distance at which the edge contrast is measured, in pixels on each side of the edge */
     limbContrastSpan: Double = 4d,
     expectedRadiusPixels: Option[Double] = None,
+    /** how far the freely measured radius may stray from the expected one before it is imposed */
+    radiusTolerance: Double = 0.25d,
     /** where the subject is expected to be, typically propagated from the previous frame of a
       * sequence : it is used as the origin of the rays and to focus the corona centroid, and it is
       * silently ignored when it does not land on the subject - a re-framing, a cloud, a mistake
@@ -57,6 +59,8 @@ object DiscDetector {
     boundaryPointCount: Int,
     inlierCount: Int,
     residualRms: Double,
+    /** how far from a circle the boundary points are, whatever its radius */
+    radialSpread: Double,
     thresholdLevel: Double,
     limbContrast: Double,
     coverage: Double
@@ -89,25 +93,31 @@ object DiscDetector {
     else {
       // The threshold is not fixed : a twilight sky, a bright horizon or a landscape in the frame
       // would put far too much of the image above any preset level, while an underexposed corona
-      // would put too little. Since the subject is always the brightest compact thing around, the
-      // level is raised - or lowered - until what stands out has a plausible size.
-      val ratios   = (config.thresholdRatio +: List(0.5d, 0.65d, 0.8d, 0.9d, 0.96d, 0.2d, 0.1d, 0.05d)).distinct
+      // would put too little.
+      //
+      // The levels are tried from the lowest up, and the first one that isolates something compact
+      // wins - the lowest threshold is the one that catches the whole subject. Starting from the
+      // top instead would stop at the first thing that stands out, and on a frame whose disc is
+      // dim but whose limb is burnt, that first thing is the bright rim alone : a subject five
+      // times too small, with no limb around it, taken for a corona.
+      val ratios   = (config.thresholdRatio +: List(0.05d, 0.1d, 0.2d, 0.5d, 0.65d, 0.8d, 0.9d, 0.96d)).distinct.sorted
       val attempts = ratios.view.map { ratio =>
         val level = background + ratio * range
         (level, raster.brighterThan(level))
       }
       val found    = attempts.find { case (_, mask) =>
-        val (horizontal, vertical) = mask.span
+        val (horizontal, vertical) = mask.span()
         mask.coverage >= config.minimumCoverage &&
         mask.coverage <= config.maximumCoverage &&
         horizontal <= config.maximumSpanRatio &&
-        vertical <= config.maximumSpanRatio
+        vertical <= config.maximumSpanRatio &&
+        plausibleSize(mask, config)
       }
 
       found match {
         case None =>
           val (_, first) = attempts.head
-          val (horizontal, vertical) = first.span
+          val (horizontal, vertical) = first.span()
           if (first.coverage < config.minimumCoverage)
             Left(f"subject too small or too faint (coverage ${first.coverage}%.8f, ${ratios.size} thresholds tried)")
           else
@@ -116,25 +126,99 @@ object DiscDetector {
                 f"spanning ${horizontal * 100}%.0f%% x ${vertical * 100}%.0f%% of it, ${ratios.size} thresholds tried)"
             )
 
-        case Some((threshold, mask)) =>
+        case Some((locatingLevel, locatingMask)) =>
+        // Two thresholds, because they answer two different questions. The low one above found
+        // *where* the subject is, halo and faint parts included - that is what it is for. Measuring
+        // an edge on it would be wrong : it follows the outer haze rather than the limb, and the
+        // points scatter. The edge of a body sits at half height between it and its background, so
+        // now that the subject is located, its own level is read and the limb measured there.
+        val (threshold, mask) =
+          raster.medianAbove(locatingLevel) match {
+            case Some(subjectLevel) if subjectLevel > locatingLevel =>
+              val halfHeight = (background + subjectLevel) / 2d
+              val refined    = raster.brighterThan(halfHeight)
+              if (refined.count > 0 && refined.centroid.isDefined) (halfHeight, refined)
+              else (locatingLevel, locatingMask)
+            case _                                                  => (locatingLevel, locatingMask)
+          }
+
         mask.centroid match {
           case None           => Left("no lit pixel found")
           case Some(centroid) =>
             val (cx, cy) = trustedCenter(config, centroid, raster)
             val samples  = scanRays(raster, mask, cx, cy, range, config)
-            val contrast = medianContrast(samples)
-            val kind     = config.kindHint.getOrElse {
-              if (samples.nonEmpty && contrast >= config.limbContrastThreshold) DiscKind.Photosphere
-              else DiscKind.Corona
-            }
-            kind match {
-              case DiscKind.Photosphere => fitPhotosphere(raster, mask, samples, threshold, contrast, range, config)
-              case DiscKind.Corona      => fitCorona(raster, mask, threshold, contrast, (cx, cy), config)
+
+            // The limb is looked for first, and the answer is judged afterwards. Deciding
+            // beforehand meant deciding on the edge of the thresholded mask, which sits well inside
+            // a saturated disc and shows no step there : a sharp limb then looked like a corona.
+            // Fitting first costs one pass and lets the contrast be measured where it means
+            // something - across the circle that was found.
+            def corona() = fitCorona(raster, mask, threshold, (cx, cy), config)
+
+            config.kindHint match {
+              case Some(DiscKind.Corona) => corona()
+              case hint                   =>
+                fitPhotosphere(raster, mask, samples, threshold, range, config) match {
+                  case Right(detection)
+                      if hint.contains(DiscKind.Photosphere) ||
+                        detection.limbContrast >= config.limbContrastThreshold ||
+                        !hollow(raster, detection.circle) =>
+                    Right(detection)
+                  case _ => corona()
+                }
             }
         }
       }
     }
   }
+
+  /** Whether the subject is a ring of light around a dark middle, rather than a filled disc.
+    *
+    * This is what totality looks like, and nothing else does : the moon sits in the middle and it
+    * is black. The distinction matters because a soft limb is not enough to tell - a sun a couple
+    * of degrees above the horizon crosses so much atmosphere that its edge genuinely blurs, and a
+    * whole hour of such frames was being taken for totality on that ground alone. Its middle,
+    * however, is as bright as ever.
+    */
+  private def hollow(raster: GrayRaster, circle: Circle, ringCount: Int = 20): Boolean = {
+    // the shape of the radial profile decides, not a ratio between two chosen radii : the fitted
+    // circle may well be smaller than the dark middle itself, and comparing an inner disc with an
+    // outer ring would then compare darkness with darkness. A filled disc peaks at its center, a
+    // ring peaks away from it, whatever the scale.
+    val reach  = circle.radius * 1.5d
+    val step   = reach / ringCount
+    val totals = Array.ofDim[Double](ringCount)
+    val counts = Array.ofDim[Int](ringCount)
+    var y      = math.max(0, (circle.centerY - reach).toInt)
+    val lastY  = math.min(raster.height - 1, (circle.centerY + reach).toInt)
+    while (y <= lastY) {
+      var x     = math.max(0, (circle.centerX - reach).toInt)
+      val lastX = math.min(raster.width - 1, (circle.centerX + reach).toInt)
+      while (x <= lastX) {
+        val ring = (circle.distanceToCenter(x, y) / step).toInt
+        if (ring < ringCount) { totals(ring) += raster(x, y); counts(ring) += 1 }
+        x += 1
+      }
+      y += 1
+    }
+
+    val profile = Array.tabulate(ringCount)(index => if (counts(index) == 0) 0d else totals(index) / counts(index))
+    val peak    = profile.indices.maxBy(profile.apply)
+    // the brightest ring has to sit clearly away from the center, and the center to be much darker
+    peak * step > circle.radius * 0.2d && profile(0) < profile(peak) * 0.5d
+  }
+
+  /** Whether what stands out could be the subject, size wise.
+    *
+    * Only ever checked when the expected radius is known, and generously : a crescent covers much
+    * less area than a full disc, so this rules out the gross mistakes - a bright rim mistaken for
+    * the whole sun - not the fine ones.
+    */
+  private def plausibleSize(mask: BitMask, config: DiscDetectorConfig): Boolean =
+    config.expectedRadiusPixels.forall { expected =>
+      val equivalentRadius = math.sqrt(mask.count / math.Pi)
+      equivalentRadius >= expected * 0.25d && equivalentRadius <= expected * 1.6d
+    }
 
   /** One sample per ray : where the lit area ends, and how sharp that edge is */
   private final case class EdgeSample(point: Point, contrast: Double)
@@ -148,25 +232,44 @@ object DiscDetector {
     mask: BitMask,
     samples: Seq[EdgeSample],
     threshold: Double,
-    contrast: Double,
     range: Double,
     config: DiscDetectorConfig
   ): Either[String, DiscDetection] = {
-    def fitFrom(points: Seq[Point]) =
+    def fitFrom(points: Seq[Point], knownRadius: Option[Double]) =
       if (points.sizeIs < 8) None
       else
         CircleFitting
           .robustOuterFit(
             points = points,
-            knownRadius = config.expectedRadiusPixels,
+            knownRadius = knownRadius,
             iterations = config.fitIterations,
             minimumInlierRatio = config.minimumInlierRatio
           )
           .map { case (circle, inliers) => (circle, inliers, points.size) }
 
-    val first  = fitFrom(samples.map(_.point))
+    /** The expected radius is a safety net, never a straitjacket.
+      *
+      * Imposing it looks tempting since the session knows its plate scale, but the apparent radius
+      * of the disc breathes a little from one exposure to the next. Imposing a radius larger than
+      * the one the frame actually shows puts every single limb point *inside* the circle, they all
+      * get rejected as if they belonged to the moon, and the fit ends up on whatever noise is left.
+      * So the free fit has the first word, and the expected radius only steps in when that fit
+      * comes back with something implausible - which is what happens on the thinnest crescents.
+      */
+    def fitBoth(points: Seq[Point]) = {
+      val free = fitFrom(points, None)
+      (free, config.expectedRadiusPixels) match {
+        case (Some((circle, _, _)), Some(expected)) if math.abs(circle.radius - expected) / expected > config.radiusTolerance =>
+          fitFrom(points, Some(expected)).orElse(free)
+        case (None, Some(expected))                                                                                          =>
+          fitFrom(points, Some(expected))
+        case _                                                                                                               => free
+      }
+    }
+
+    val first  = fitBoth(samples.map(_.point))
     val second = first.flatMap { case (circle, _, _) =>
-      fitFrom(scanRays(raster, mask, circle.centerX, circle.centerY, range, config).map(_.point))
+      fitBoth(scanRays(raster, mask, circle.centerX, circle.centerY, range, config).map(_.point))
     }
 
     second.orElse(first) match {
@@ -179,11 +282,54 @@ object DiscDetector {
             boundaryPointCount = sampled,
             inlierCount = inliers.size,
             residualRms = CircleFitting.residualRms(circle, inliers),
+            radialSpread = CircleFitting.radialSpread(circle, inliers),
             thresholdLevel = threshold,
-            limbContrast = contrast,
+            limbContrast = limbContrastAcross(raster, circle, inliers, range, config),
             coverage = mask.coverage
           )
         )
+    }
+  }
+
+  /** How abruptly the brightness falls across the fitted edge, between 0 and 1.
+    *
+    * What separates a limb from a corona is not how much the brightness drops but how *fast* : the
+    * solar limb falls to the sky within a pixel or two, a corona fades over hundreds. So the drop
+    * measured close to the edge is compared with the drop measured far from it. On a step, both are
+    * the same and the ratio is close to one ; on a corona, most of the fall happens further out and
+    * the ratio stays low.
+    *
+    * Judging on the amplitude instead - as this did - fails twice over. At the edge of the
+    * thresholded mask, which on a saturated disc sits well inside it, there is no step to be seen ;
+    * and normalizing by the dynamic range of the whole frame makes a perfectly sharp but dim limb
+    * look flat next to a burnt out rim. Both mistakes turned unfiltered partial phases of a real
+    * session into totality frames.
+    */
+  private def limbContrastAcross(
+    raster: GrayRaster,
+    circle: Circle,
+    inliers: Seq[Point],
+    range: Double,
+    config: DiscDetectorConfig
+  ): Double = {
+    if (inliers.isEmpty || range <= 0d) 0d
+    else {
+      val near      = config.limbContrastSpan
+      val far       = near * 4d
+      val sharpness = inliers.flatMap { point =>
+        val angle      = math.atan2(point.y - circle.centerY, point.x - circle.centerX)
+        val directionX = math.cos(angle)
+        val directionY = math.sin(angle)
+        def at(distance: Double) =
+          sample(raster, circle.centerX + directionX * distance, circle.centerY + directionY * distance)
+
+        val nearDrop = at(circle.radius - near) - at(circle.radius + near)
+        val farDrop  = at(circle.radius - far) - at(circle.radius + far)
+        // an edge worth judging has to drop at all, and by something above the noise
+        Option.when(farDrop > range * 0.02d)(math.max(0d, math.min(1d, nearDrop / farDrop)))
+      }.sorted
+
+      if (sharpness.isEmpty) 0d else sharpness(sharpness.size / 2)
     }
   }
 
@@ -194,7 +340,6 @@ object DiscDetector {
     raster: GrayRaster,
     mask: BitMask,
     threshold: Double,
-    contrast: Double,
     origin: (Double, Double),
     config: DiscDetectorConfig
   ): Either[String, DiscDetection] = {
@@ -225,8 +370,9 @@ object DiscDetector {
           boundaryPointCount = 0,
           inlierCount = mask.count,
           residualRms = 0d,
+          radialSpread = 0d,
           thresholdLevel = threshold,
-          limbContrast = contrast,
+          limbContrast = 0d, // no limb : that is precisely why this branch was taken
           coverage = mask.coverage
         )
       )

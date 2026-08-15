@@ -24,9 +24,18 @@ final case class Shot(key: String, name: String, files: List[Path]) {
   def hasBoth: Boolean = rawFiles.nonEmpty && renderedFiles.nonEmpty
 
   /** The file to measure and to draw from */
-  def pixelSource(preferRaw: Boolean): Path =
-    if (preferRaw) rawFiles.headOption.orElse(renderedFiles.headOption).getOrElse(files.head)
-    else renderedFiles.headOption.orElse(rawFiles.headOption).getOrElse(files.head)
+  def pixelSource(preferRaw: Boolean): Path = pixelSources(preferRaw).head
+
+  /** Every file the pixels could be taken from, the preferred one first.
+    *
+    * A shot written as RAW+JPEG has a spare : if the RAW cannot be decoded, or if what the decoder
+    * wrote cannot be read back, the JPEG the camera put beside it holds the very same photograph.
+    * Giving up on a frame while another copy of it sits there would be absurd.
+    */
+  def pixelSources(preferRaw: Boolean): List[Path] = {
+    val ordered = if (preferRaw) rawFiles ++ renderedFiles else renderedFiles ++ rawFiles
+    if (ordered.isEmpty) files else ordered
+  }
 
   /** The files to read the metadata from, the most talkative first : whatever the pixels come from,
     * a JPEG written by the camera is the most reliable source of date and position.

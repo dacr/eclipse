@@ -123,6 +123,27 @@ object Rasters {
       }
     }
 
+    /** Median of the pixels brighter than the given level.
+      *
+      * The brightness of a subject that only occupies a sliver of the frame - a thin crescent - is
+      * not readable from a percentile of the whole raster : the answer would depend on how much of
+      * the frame the subject happens to cover. Looking only at what is actually lit does not.
+      */
+    def medianAbove(level: Double): Option[Double] = {
+      val collected = Array.newBuilder[Float]
+      var index     = 0
+      while (index < values.length) {
+        if (values(index) > level) collected += values(index)
+        index += 1
+      }
+      val lit = collected.result()
+      if (lit.isEmpty) None
+      else {
+        val sorted = lit.sorted
+        Some(sorted(sorted.length / 2).toDouble)
+      }
+    }
+
     /** Binary mask of every pixel strictly brighter than the given level */
     def brighterThan(level: Double): BitMask = {
       val flags = Array.ofDim[Boolean](values.length)
@@ -210,13 +231,41 @@ object Rasters {
       *
       * A round subject stays compact whatever its brightness : anything spanning the whole frame is
       * not the subject but the sky, the ground, or a flare.
+      *
+      * The bulk of the mask is what counts, not its stragglers : the bounding box would be thrown
+      * across the whole frame by a single hot pixel in a corner, and a low threshold always brings
+      * a few of those along. The span is therefore measured on the range holding all but the
+      * outermost `tailRatio` of the lit pixels.
       */
-    def span: (Double, Double) =
-      bounds match {
-        case None                                          => (0d, 0d)
-        case Some((minimumX, minimumY, maximumX, maximumY)) =>
-          ((maximumX - minimumX + 1).toDouble / width, (maximumY - minimumY + 1).toDouble / height)
+    def span(tailRatio: Double = 0.01d): (Double, Double) = {
+      if (count == 0) (0d, 0d)
+      else {
+        val columns = Array.ofDim[Int](width)
+        val rows    = Array.ofDim[Int](height)
+        var y       = 0
+        while (y < height) {
+          var x = 0
+          while (x < width) {
+            if (flags(y * width + x)) { columns(x) += 1; rows(y) += 1 }
+            x += 1
+          }
+          y += 1
+        }
+        (extent(columns, count, tailRatio) / width.toDouble, extent(rows, count, tailRatio) / height.toDouble)
       }
+    }
+
+    /** Number of slots holding the bulk of the population, tails left aside on both sides */
+    private def extent(counts: Array[Int], total: Int, tailRatio: Double): Double = {
+      val toDrop = (total * tailRatio).toInt
+      var low     = 0
+      var dropped = 0
+      while (low < counts.length - 1 && dropped + counts(low) <= toDrop) { dropped += counts(low); low += 1 }
+      var high    = counts.length - 1
+      dropped = 0
+      while (high > low && dropped + counts(high) <= toDrop) { dropped += counts(high); high -= 1 }
+      (high - low + 1).toDouble
+    }
 
     /** Center of gravity of the mask, beware : for a crescent shape this is NOT the disc center */
     def centroid: Option[(Double, Double)] = {

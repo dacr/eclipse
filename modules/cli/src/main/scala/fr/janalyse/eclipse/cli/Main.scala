@@ -19,6 +19,7 @@ object Main {
       |
       |usage :
       |  analyze <files or directories...>   measures every frame and writes the measurements file
+      |  inspect <files or directories...>   draws what the detection found, to be looked at
       |  plan    <files or measurements.csv> says what would be drawn, without drawing anything
       |  compose <files or measurements.csv> builds the composite picture
       |
@@ -36,6 +37,8 @@ object Main {
       |  every setting below is worked out from the measurements when it is not given
       |  --no-auto                 keeps the plain defaults instead of the measured settings
       |  --min-confidence <0..1>   how sure a measurement has to be to be drawn (default : 0.2)
+      |  --balanced                keeps as many frames before the maximum as after it
+      |  --frames-per-side <n>     hard limit on the number of frames on each side of the maximum
       |  --max-pixels <n>          largest composite to produce (default : 200000000)
       |  --max-side <n>            largest composite side, in pixels (default : 24000)
       |  --layout <name>           sky-path, sky-path-even, timeline, grid
@@ -55,11 +58,12 @@ object Main {
 
   def main(args: Array[String]): Unit = {
     args.toList match {
-      case command :: rest if Set("analyze", "plan", "compose").contains(command) =>
+      case command :: rest if Set("analyze", "plan", "compose", "inspect").contains(command) =>
         val options = Options.parse(rest)
         val outcome = command match {
           case "analyze" => analyze(options)
           case "plan"    => plan(options)
+          case "inspect" => inspect(options)
           case _         => compose(options)
         }
         outcome match {
@@ -107,6 +111,58 @@ object Main {
     }
   }
 
+  /** Draws what the detection found on top of the frames, to be looked at.
+    *
+    * Numbers only say so much : a fit whose residual is large may be a disc cut by a branch, a sun
+    * touching the frame border, or a genuinely bad measurement, and the eye tells them apart in a
+    * second where a report cannot.
+    */
+  private def inspect(options: Options): Either[String, String] = {
+    for {
+      inputs <- imageInputs(options)
+    } yield {
+      val directory = options.path("out").getOrElse(Paths.get("out/inspect"))
+      Files.createDirectories(directory)
+      val config    = analysisConfig(options)
+      val shots     = Shot.group(inputs)
+      val lines     = shots.map { shot =>
+        val frame = FrameAnalyzer.analyzeShot(shot, config)
+        frame.disc match {
+          case None       => s"${shot.name} : ${frame.issues.mkString(", ")}"
+          case Some(disc) =>
+            val drawn = RawDecoder
+              .load(frame.path, config.cacheDirectory, config.rawDecode)
+              .map { image =>
+                val marked   = BasicImaging.convertTo(image, java.awt.image.BufferedImage.TYPE_INT_RGB)
+                val graphics = marked.createGraphics
+                try {
+                  graphics.setStroke(java.awt.BasicStroke(math.max(2f, disc.radiusPixels.toFloat / 60f)))
+                  graphics.setColor(java.awt.Color.GREEN)
+                  graphics.drawOval(
+                    (disc.centerX - disc.radiusPixels).toInt,
+                    (disc.centerY - disc.radiusPixels).toInt,
+                    (disc.radiusPixels * 2).toInt,
+                    (disc.radiusPixels * 2).toInt
+                  )
+                  val arm = (disc.radiusPixels / 4).toInt
+                  graphics.setColor(java.awt.Color.RED)
+                  graphics.drawLine(disc.centerX.toInt - arm, disc.centerY.toInt, disc.centerX.toInt + arm, disc.centerY.toInt)
+                  graphics.drawLine(disc.centerX.toInt, disc.centerY.toInt - arm, disc.centerX.toInt, disc.centerY.toInt + arm)
+                } finally graphics.dispose()
+                val output = directory.resolve(s"${shot.name}-detection.png")
+                BasicImaging.save(output, BasicImaging.fitWithin(marked, options.int("inspect-size").getOrElse(1400)))
+                output
+              }
+            f"${shot.name} : ${disc.phase} center=(${disc.centerX}%.1f,${disc.centerY}%.1f) r=${disc.radiusPixels}%.1f " +
+              f"residual=${disc.fitResidualPixels}%.2fpx confidence=${disc.detectionConfidence}%.2f " +
+              f"limbContrast=${disc.limbContrast}%.2f room=${disc.roomFactor.getOrElse(0d)}%.2f " +
+              drawn.map(path => s"-> $path").getOrElse("(image not drawn)")
+        }
+      }
+      lines.mkString("\n")
+    }
+  }
+
   private def plan(options: Options): Either[String, String] = {
     for {
       frames <- loadFrames(options)
@@ -141,7 +197,18 @@ object Main {
         tuned.explanations.map(explanation => s"automatic             : $explanation").mkString("\n"),
         "",
         s"layout                : ${config.layout.name}",
-        s"selected frames       : ${selection.keptCount} of ${selection.candidateCount}",
+        s"selected frames       : ${selection.keptCount} of ${selection.candidateCount}" +
+          (selection.kept.count(_.phase == fr.janalyse.eclipse.model.FramePhase.Totality) match {
+            case 0     => ", none of them during totality"
+            case count => s", $count of them during totality"
+          }),
+        FrameSelector.representativeMaximum(frames.filter(_.isUsable)).instant match {
+          case None          => ""
+          case Some(maximum) =>
+            val before = selection.kept.count(_.instant.exists(_.isBefore(maximum)))
+            val after  = selection.kept.count(_.instant.exists(_.isAfter(maximum)))
+            s"around the maximum    : $before before, $after after"
+        },
         f"output scale          : $pixelsPerDegree%.0f px/° (solar disc ${2 * config.render.discRadiusPixels}%.0f px)",
         f"composite size        : ${width + 2 * config.render.marginPixels}%.0f x ${height + 2 * config.render.marginPixels}%.0f px",
         f"field covered         : ${width / pixelsPerDegree}%.2f° x ${height / pixelsPerDegree}%.2f°",
@@ -214,7 +281,9 @@ object Main {
         AutoTuner.TuningIntent(
           maximumCanvasPixels = options.double("max-pixels").map(_.toLong).getOrElse(200000000L),
           maximumCanvasSide = options.int("max-side").getOrElse(24000),
-          separationFactor = options.double("separation").getOrElse(1.05d)
+          separationFactor = options.double("separation").getOrElse(1.05d),
+          balanced = options.flag("balanced") || options.int("frames-per-side").isDefined,
+          framesPerSide = options.int("frames-per-side")
         )
       )
 
@@ -225,7 +294,9 @@ object Main {
         separationFactor = options.double("separation").getOrElse(tuned.selection.separationFactor),
         tileRadiusFactor = options.double("tile-factor").getOrElse(tuned.selection.tileRadiusFactor),
         totalityTileRadiusFactor = options.double("totality-factor").getOrElse(tuned.selection.totalityTileRadiusFactor),
-        minimumConfidence = options.double("min-confidence").getOrElse(tuned.selection.minimumConfidence)
+        minimumConfidence = options.double("min-confidence").getOrElse(tuned.selection.minimumConfidence),
+        balanced = options.flag("balanced") || options.int("frames-per-side").isDefined,
+        framesPerSide = options.int("frames-per-side")
       ),
       layout = options.value("layout") match {
         case Some("sky-path-even") => SkyPathLayout(evenSpacing = true)
@@ -345,7 +416,8 @@ object Main {
     private val valuedOptions = Set(
       "out", "cache", "observer", "parallelism", "pressure", "temperature",
       "layout", "disc-radius", "separation", "tile-factor", "totality-factor",
-      "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin", "min-confidence"
+      "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin", "min-confidence",
+      "frames-per-side"
     )
 
     def parse(arguments: List[String]): Options = {

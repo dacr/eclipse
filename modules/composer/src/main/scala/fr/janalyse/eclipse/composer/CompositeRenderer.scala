@@ -219,25 +219,39 @@ object CompositeRenderer {
         stretched.toImage
 
       case _ =>
-        // The reference is the brightness of the photosphere itself, taken as a high percentile of
-        // the whole tile. Measuring it over the disc area would collapse as the moon covers it :
-        // a thin crescent would then be stretched until it saturates, and would come out white or
-        // oddly tinted while its neighbours stay correct.
-        val photosphereLevel = raster.toGray.percentile(0.999d)
-        val litLevel         = math.max(0.01d, photosphereLevel * 0.5d)
-
-        val neutralized =
-          if (!config.neutralizeColorCast) raster
+        // Subtracting the sky level leaves its grain and its gradient behind, and the brightness
+        // normalization that follows would multiply those along with the disc - the more so as the
+        // sun gets low and dim. Anything still within the wavering of the sky is therefore clipped
+        // away first : past the limb, a filtered frame holds nothing worth keeping anyway.
+        val cleaned =
+          if (!config.subtractSkyBackground) raster
           else
             DiscMeasures
-              .meanColorWithin(raster, disc, litLevel)
-              .map(reference => ColorBalance.neutralizeFrom(raster, reference, config.discColor))
+              .luminancePercentilesInRing(raster, Circle(halfSize, halfSize, 0d), discRadiusPixels * 1.15d, halfSize, List(0.98d))
+              .map(levels => ColorBalance.removeBackground(raster, levels.head))
               .getOrElse(raster)
+
+        // The reference is the brightness of the photosphere itself, read on the lit pixels alone.
+        // Over the disc area it would collapse as the moon covers it, and over the whole tile it
+        // would depend on how much of that tile the crescent happens to fill : either way a thin
+        // crescent ends up stretched until it saturates, coming out white next to its neighbours.
+        val gray             = cleaned.toGray
+        val litLevel         = math.max(0.01d, gray.percentile(0.9999d) * 0.5d)
+        val photosphereLevel = gray.medianAbove(litLevel).getOrElse(gray.percentile(0.999d))
+
+        val neutralized =
+          if (!config.neutralizeColorCast) cleaned
+          else
+            DiscMeasures
+              .meanColorWithin(cleaned, disc, litLevel)
+              .map(reference => ColorBalance.neutralizeFrom(cleaned, reference, config.discColor))
+              .getOrElse(cleaned)
 
         val normalized =
           if (!config.normalizeBrightness) neutralized
           else {
-            val reference = neutralized.toGray.percentile(0.999d)
+            val corrected = neutralized.toGray
+            val reference = corrected.medianAbove(litLevel).getOrElse(corrected.percentile(0.999d))
             ToneMapping.normalizeReferenceLevel(neutralized, reference, config.targetDiscLevel)
           }
         normalized.toImage
@@ -253,7 +267,10 @@ object CompositeRenderer {
   ): Array[Float] = {
     val halfSize = size / 2d
     val (inner, outer) = phase match {
-      case FramePhase.Totality => (halfSize * (1d - config.featherRatio * 2d), halfSize)
+      // the tile of a totality frame is sized on the corona actually recorded, so the fade has to
+      // stay at its very edge : starting it half way in would rub out the outer corona, which is
+      // the one thing those frames are there for
+      case FramePhase.Totality => (halfSize * (1d - config.featherRatio), halfSize)
       case _                   =>
         val edge = math.min(halfSize, discRadiusPixels * 1.04d)
         (edge, math.min(halfSize, edge * (1d + config.featherRatio)))

@@ -69,21 +69,31 @@ object ColorBalance {
     * removes it by making the measured reference neutral, then optionally re-tints the result to a
     * chosen color - a slightly warm sun usually looks better than a pure white one.
     */
+  /** @param maximumGain a channel is never pushed further than that.
+    *
+    * The bound is not a detail. A sun a couple of degrees above the horizon is deeply reddened by
+    * the atmosphere - its blue channel may hold almost nothing - and asking for a neutral disc then
+    * means multiplying that channel by ten or twenty. What little signal there is gets amplified
+    * along with the sky and the noise, and the frame comes out blue with a green crescent in it.
+    * Past the bound, the correction is simply left incomplete : a low sun is meant to look warm.
+    */
   def neutralizeFrom(
     raster: RgbRaster,
     reference: (Double, Double, Double),
-    target: (Double, Double, Double) = (1d, 1d, 1d)
+    target: (Double, Double, Double) = (1d, 1d, 1d),
+    maximumGain: Double = 2.5d
   ): RgbRaster = {
     val (referenceRed, referenceGreen, referenceBlue) = reference
     val (targetRed, targetGreen, targetBlue)          = target
     if (referenceRed <= 1e-6d || referenceGreen <= 1e-6d || referenceBlue <= 1e-6d) raster
     else {
       val referenceMean = (referenceRed + referenceGreen + referenceBlue) / 3d
+      def bounded(gain: Double): Double = math.max(1d / maximumGain, math.min(maximumGain, gain))
       applyGains(
         raster,
-        redGain = targetRed * referenceMean / referenceRed,
-        greenGain = targetGreen * referenceMean / referenceGreen,
-        blueGain = targetBlue * referenceMean / referenceBlue
+        redGain = bounded(targetRed * referenceMean / referenceRed),
+        greenGain = bounded(targetGreen * referenceMean / referenceGreen),
+        blueGain = bounded(targetBlue * referenceMean / referenceBlue)
       )
     }
   }

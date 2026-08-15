@@ -26,8 +26,16 @@ object FrameSelector {
     /** totality frames deserve more room, the corona spreads far beyond the disc */
     totalityTileRadiusFactor: Double = 3d,
     anchor: Anchor = Anchor.MaximumEclipse,
-    /** always keep the most eclipsed frame, whatever the separation rule says */
-    keepMaximumEclipse: Boolean = true,
+    /** keep as many frames before the maximum as after it.
+      *
+      * A session is rarely symmetric - this one starts an hour and a half before totality and stops
+      * at sunset - so the walk naturally brings back more frames on one side. Balancing trims the
+      * longer side to the length of the shorter one, which makes the composite read as a sequence
+      * built around its middle rather than one drifting off to a side.
+      */
+    balanced: Boolean = false,
+    /** hard limit on the number of frames kept on each side of the maximum */
+    framesPerSide: Option[Int] = None,
     /** drop frames whose measurement is doubtful */
     minimumConfidence: Double = 0.2d
   )
@@ -60,33 +68,58 @@ object FrameSelector {
     val rejectedForQuality = frames.size - usable.size
     if (usable.isEmpty) Selection(Nil, frames.size, 0, rejectedForQuality)
     else {
+      // The maximum of the eclipse is the anchor, not an afterthought : starting the walk there is
+      // what puts it in the selection while the spacing rule keeps holding. Adding it afterwards
+      // would drop it right next to a neighbour and break the one promise this whole thing makes.
       val anchorIndex = config.anchor match {
         case Anchor.First          => 0
         case Anchor.Last           => usable.size - 1
         case Anchor.MaximumEclipse =>
-          usable.zipWithIndex.maxBy { case (frame, _) => frame.obscuration.getOrElse(0d) }._2
+          val maximum = representativeMaximum(usable)
+          math.max(0, usable.indexWhere(_.path == maximum.path))
       }
 
-      // the anchor first, then both directions, so that the most eclipsed frame is always centered
-      // on the real maximum and the neighbours spread symmetrically around it
+      // the anchor first, then both directions, so that the neighbours spread symmetrically around it
       val forward  = walk(usable, anchorIndex, 1, config)
       val backward = walk(usable, anchorIndex, -1, config)
-      val kept     = (backward.reverse ++ List(usable(anchorIndex)) ++ forward)
 
-      val withMaximum =
-        if (!config.keepMaximumEclipse) kept
-        else {
-          val mostEclipsed = usable.maxBy(_.obscuration.getOrElse(0d))
-          if (kept.exists(_.path == mostEclipsed.path)) kept
-          else (kept :+ mostEclipsed).sortBy(_.instant.map(_.toEpochMilli).getOrElse(0L))
-        }
+      // both walks come away from the anchor, so trimming their tails drops the frames furthest
+      // from the maximum - the ones the sequence can most afford to lose
+      val perSide  = config.framesPerSide
+        .orElse(Option.when(config.balanced)(math.min(forward.size, backward.size)))
+        .getOrElse(Int.MaxValue)
+      val kept     = backward.take(perSide).reverse ++ List(usable(anchorIndex)) ++ forward.take(perSide)
 
       Selection(
-        kept = withMaximum.toList,
+        kept = kept.toList,
         candidateCount = frames.size,
-        rejectedForOverlap = usable.size - withMaximum.size,
+        rejectedForOverlap = usable.size - kept.size,
         rejectedForQuality = rejectedForQuality
       )
+    }
+  }
+
+  /** The one frame that stands for the maximum of the eclipse.
+    *
+    * Every totality frame reads as fully obscured, so picking the most obscured one just returns
+    * whichever came first - and the frames flanking totality, where the crescent is a hair thin,
+    * read the same way. Totality is a continuous stretch of a minute or two, often shot as a burst,
+    * so the longest run of consecutive totality frames is the real thing, and its middle is the
+    * safest place to stand : not a diamond ring at either end.
+    */
+  def representativeMaximum(frames: Seq[FrameAnalysis]): FrameAnalysis = {
+    val ordered = frames.sortBy(_.instant.map(_.toEpochMilli).getOrElse(0L))
+    val runs    = ordered.zipWithIndex
+      .filter { case (frame, _) => frame.phase == FramePhase.Totality }
+      .foldLeft(List.empty[Vector[FrameAnalysis]]) { case (accumulated, (frame, index)) =>
+        accumulated match {
+          case head :: tail if ordered.indexOf(head.last) == index - 1 => (head :+ frame) :: tail
+          case _                                                       => Vector(frame) :: accumulated
+        }
+      }
+    runs.maxByOption(_.size) match {
+      case Some(run) if run.nonEmpty => run(run.size / 2)
+      case _                         => ordered.maxBy(_.obscuration.getOrElse(0d))
     }
   }
 

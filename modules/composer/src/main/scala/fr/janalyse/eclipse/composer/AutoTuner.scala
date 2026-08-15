@@ -24,7 +24,13 @@ object AutoTuner {
     /** below that, a solar disc becomes a dot */
     minimumDiscRadiusPixels: Double = 20d,
     /** how much air is left between two neighbour tiles */
-    separationFactor: Double = 1.05d
+    separationFactor: Double = 1.05d,
+    /** the constraints the user already asked for : the tuning has to work on the very selection
+      * that will be drawn, otherwise the output scale is computed over a wider sky than the one
+      * kept, and the composite comes out smaller than it could have been
+      */
+    balanced: Boolean = false,
+    framesPerSide: Option[Int] = None
   )
 
   final case class Tuning(
@@ -89,7 +95,9 @@ object AutoTuner {
       val selection = SelectionConfig(
         separationFactor = intent.separationFactor,
         tileRadiusFactor = tileRadiusFactor,
-        totalityTileRadiusFactor = totalityTileRadiusFactor
+        totalityTileRadiusFactor = totalityTileRadiusFactor,
+        balanced = intent.balanced,
+        framesPerSide = intent.framesPerSide
       )
       val selected  = FrameSelector.select(usable, selection)
       explanations += s"${selected.keptCount} frames kept out of ${usable.size}, spaced so that no two discs touch"

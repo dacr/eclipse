@@ -148,6 +148,42 @@ object DiscMeasures {
     }
   }
 
+  /** Luminance percentiles of a ring drawn around the subject.
+    *
+    * Where `medianColorInRing` gives the sky level, this gives how much it wavers : the gap between
+    * the median and a high percentile is the noise and the gradient of the sky put together, which
+    * is exactly what has to be clipped away rather than amplified along with the subject.
+    */
+  def luminancePercentilesInRing(
+    raster: RgbRaster,
+    circle: Circle,
+    innerRadius: Double,
+    outerRadius: Double,
+    ratios: List[Double]
+  ): Option[List[Double]] = {
+    val collected = Array.newBuilder[Float]
+    val minimumX  = math.max(0, math.floor(circle.centerX - outerRadius).toInt)
+    val maximumX  = math.min(raster.width - 1, math.ceil(circle.centerX + outerRadius).toInt)
+    val minimumY  = math.max(0, math.floor(circle.centerY - outerRadius).toInt)
+    val maximumY  = math.min(raster.height - 1, math.ceil(circle.centerY + outerRadius).toInt)
+    var y         = minimumY
+    while (y <= maximumY) {
+      var x = minimumX
+      while (x <= maximumX) {
+        val distance = circle.distanceToCenter(x, y)
+        if (distance >= innerRadius && distance <= outerRadius) collected += raster.luminance(y * raster.width + x)
+        x += 1
+      }
+      y += 1
+    }
+    val values = collected.result()
+    if (values.isEmpty) None
+    else {
+      val sorted = values.sorted
+      Some(ratios.map(ratio => sorted(math.max(0, math.min(sorted.length - 1, (sorted.length * ratio).toInt))).toDouble))
+    }
+  }
+
   /** Median color of a ring drawn around the subject : the sky level, measured where the subject is
     * not. Subtracting it removes a twilight gradient, a light polluted sky or a filter flare, and
     * it is a median so a branch or a star crossing the ring does not disturb it.

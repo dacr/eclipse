@@ -151,4 +151,20 @@ object CircleFitting {
   def residualRms(circle: Circle, points: Seq[Point]): Double =
     if (points.isEmpty) 0d
     else math.sqrt(points.map(point => math.pow(circle.residual(point.x, point.y), 2)).sum / points.size)
+
+  /** How far from a circle the points are, whatever its radius : the standard deviation of their
+    * distances to the center.
+    *
+    * This is what tells a good fit from a bad one when the radius is imposed. The apparent radius
+    * of the sun does move a little from one frame to the next - a darker exposure cuts the limb
+    * darkening earlier - and judging a fit by its distance to the imposed radius would condemn a
+    * perfectly centered measurement. What matters is that the points lie on *a* circle.
+    */
+  def radialSpread(circle: Circle, points: Seq[Point]): Double =
+    if (points.sizeIs < 2) 0d
+    else {
+      val distances = points.map(point => circle.distanceToCenter(point.x, point.y))
+      val mean      = distances.sum / distances.size
+      math.sqrt(distances.map(distance => math.pow(distance - mean, 2)).sum / distances.size)
+    }
 }

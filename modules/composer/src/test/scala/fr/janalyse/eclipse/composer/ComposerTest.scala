@@ -62,11 +62,71 @@ class ComposerTest extends munit.FunSuite {
     }
   }
 
-  test("the most eclipsed frame is always part of the selection") {
-    val frames       = session()
-    val mostEclipsed = frames.maxBy(_.obscuration.getOrElse(0d))
-    val selection    = FrameSelector.select(frames)
-    assert(selection.kept.exists(_.path == mostEclipsed.path))
+  test("the maximum of the eclipse is always part of the selection") {
+    val frames    = session()
+    val maximum   = FrameSelector.representativeMaximum(frames.filter(_.isUsable))
+    val selection = FrameSelector.select(frames)
+    assert(selection.kept.exists(_.path == maximum.path), "the frame standing for the maximum was dropped")
+    // and it really is at the maximum, not merely somewhere in the selection
+    assert(maximum.obscuration.exists(_ > 0.99d), s"${maximum.name} is not at the maximum of the eclipse")
+  }
+
+  test("the frame standing for the maximum is taken from the middle of totality") {
+    // totality is a continuous stretch, and every one of its frames reads as fully obscured : the
+    // first one is a diamond ring, the middle one is the corona
+    // a real session shoots a burst during those two minutes, and its frames all read as fully
+    // obscured - the crescents flanking totality do too, which is what makes the middle the only
+    // safe pick
+    val plain   = session()
+    val middle  = plain.size / 2
+    val frames  = plain.zipWithIndex.map { case (frame, index) =>
+      if (index >= middle - 4 && index <= middle + 4)
+        frame.copy(disc = frame.disc.map(_.copy(phase = FramePhase.Totality, obscuration = Some(1d))))
+      else frame
+    }
+    val totality = frames.filter(_.phase == FramePhase.Totality).sortBy(_.instant.map(_.toEpochMilli).getOrElse(0L))
+    assertEquals(totality.size, 9)
+    val maximum  = FrameSelector.representativeMaximum(frames.filter(_.isUsable))
+    assertEquals(maximum.path, totality(totality.size / 2).path)
+  }
+
+  test("a balanced selection keeps as many frames before the maximum as after it") {
+    // a session is rarely symmetric : this one is cut short after the maximum, as a sunset would
+    val frames  = session(240).take(160)
+    val maximum = FrameSelector.representativeMaximum(frames.filter(_.isUsable)).instant.get
+
+    val plain = FrameSelector.select(frames)
+    val before = plain.kept.count(_.instant.exists(_.isBefore(maximum)))
+    val after  = plain.kept.count(_.instant.exists(_.isAfter(maximum)))
+    assert(before != after, s"this session should be lopsided, got $before before and $after after")
+
+    val even = FrameSelector.select(frames, SelectionConfig(balanced = true))
+    assertEquals(
+      even.kept.count(_.instant.exists(_.isBefore(maximum))),
+      even.kept.count(_.instant.exists(_.isAfter(maximum)))
+    )
+    assertEquals(even.keptCount, math.min(before, after) * 2 + 1)
+  }
+
+  test("balancing trims the frames furthest from the maximum, keeping the closest ones") {
+    val frames  = session(240).take(160)
+    val maximum = FrameSelector.representativeMaximum(frames.filter(_.isUsable)).instant.get
+    val even    = FrameSelector.select(frames, SelectionConfig(balanced = true))
+    val plain   = FrameSelector.select(frames)
+
+    // whatever is dropped sits at the ends, never in the middle of the sequence
+    val keptInstants = even.kept.flatMap(_.instant)
+    val span         = (keptInstants.min, keptInstants.max)
+    plain.kept.flatMap(_.instant).filterNot(keptInstants.contains).foreach { dropped =>
+      assert(dropped.isBefore(span._1) || dropped.isAfter(span._2), s"$dropped was dropped from the middle")
+    }
+    assert(even.kept.exists(_.instant.contains(maximum)), "the maximum itself must stay")
+  }
+
+  test("the number of frames per side can be capped outright") {
+    val frames = session()
+    val capped = FrameSelector.select(frames, SelectionConfig(framesPerSide = Some(3)))
+    assertEquals(capped.keptCount, 7) // three on each side, plus the maximum
   }
 
   test("selection by obscuration step spreads the eclipse progress evenly") {

@@ -65,7 +65,23 @@ class DiscDetectorTest extends munit.FunSuite {
     val found  = DiscDetector.detect(image, config).fold(error => fail(error), identity)
     assertEqualsDouble(found.circle.centerX, sun.centerX, 3d)
     assertEqualsDouble(found.circle.centerY, sun.centerY, 3d)
-    assertEqualsDouble(found.circle.radius, 200d, 0.001d)
+    assertEqualsDouble(found.circle.radius, 200d, 3d)
+    // the fit is left free as long as it stays plausible : the measured radius is its own, not the
+    // one handed over, otherwise a disc that looks a little smaller than expected would have all of
+    // its limb rejected as if it belonged to the moon
+    assert(found.radialSpread < 2d, f"the limb points should sit on a circle, spread ${found.radialSpread}%.2f px")
+  }
+
+  test("a radius expected far too large does not throw the whole limb away") {
+    val sun    = Circle(700d, 500d, 200d)
+    val image  = eclipseFrame(sun = sun, moon = Some(Circle(790d, 430d, 205d)))
+    // the session says 240 px where the frame shows 200, as a darker exposure would
+    val config = DiscDetector.DiscDetectorConfig(expectedRadiusPixels = Some(240d))
+    val found  = DiscDetector.detect(image, config).fold(error => fail(error), identity)
+    assertEqualsDouble(found.circle.centerX, sun.centerX, 4d)
+    assertEqualsDouble(found.circle.centerY, sun.centerY, 4d)
+    assertEqualsDouble(found.circle.radius, 200d, 6d)
+    assert(found.inlierCount > found.boundaryPointCount / 4, s"${found.inlierCount} inliers out of ${found.boundaryPointCount}")
   }
 
   test("obscuration measures how much of the solar disc is hidden") {

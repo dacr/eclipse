@@ -164,6 +164,8 @@ valeurs par défaut brutes.
 |---|---|
 | `--max-pixels`, `--max-side` | bornes de la taille de sortie, c'est le seul réglage vraiment utile |
 | `--disc-radius` | force la taille du soleil dans le composite, donc l'échelle de sortie |
+| `--balanced` | même nombre de vues avant et après le maximum |
+| `--frames-per-side` | fixe ce nombre, plutôt que de le déduire |
 | `--separation` | 1,0 = disques jointifs, 1,05 = 5 % d'air (défaut) |
 | `--tile-factor` | force la marge autour du disque |
 | `--totality-factor` | force la marge autour d'une vue de totalité |
@@ -286,6 +288,20 @@ séquence.
 
 ---
 
+**Le décodage RAW passe par le format natif du convertisseur.** `dcraw_emu` sait écrire du
+TIFF, mais un TIFF que le lecteur intégré à la JVM refuse (`Data segment out of stream`) :
+le décodage réussissait et le cache était pourtant illisible. On lui demande donc son
+format natif, le netpbm (PPM), qui n'a rien à interpréter — un nombre magique, trois
+entiers, puis les échantillons — et que ce projet lit lui-même, en conservant les seize
+bits par canal. Chaque convertisseur écrit ainsi ce qu'il fait de mieux : PPM pour LibRaw,
+PNG pour darktable, TIFF pour RawTherapee.
+
+Le cache est volumineux : une image 45 Mpix en seize bits pèse **270 Mo**, soit environ
+55 Go pour une séance de 200 prises. `make clean-cache` s'en débarrasse une fois le
+composite obtenu. Les fichiers y sont publiés d'un seul coup, par un renommage atomique :
+le décodage prend des secondes et court en avance sur la mesure, il ne faut pas qu'une
+image à moitié écrite soit lue entre temps.
+
 ## Prérequis
 
 - JDK 21, SBT
@@ -296,7 +312,7 @@ séquence.
   en cache (`.eclipse-cache`).
 
 ```bash
-sbt test        # 67 tests
+sbt test        # 84 tests
 sbt cli/run     # aide en ligne
 
 # une session d'exemple, pour essayer sans sortir les RAW

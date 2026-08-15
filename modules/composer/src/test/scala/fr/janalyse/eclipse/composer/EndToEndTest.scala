@@ -37,7 +37,9 @@ class EndToEndTest extends munit.FunSuite {
       graphics.setColor(Color(3, 2, 5))
       graphics.fillRect(0, 0, frameWidth, frameHeight)
       // the solar filter gives a strong color cast, the composer is supposed to cancel it
-      graphics.setColor(Color(255, 160, 90))
+      // a filtered photosphere is coloured but not clipped : leaving a channel at 255 would give
+      // the brightness normalization no room to work with, which no real frame does
+      graphics.setColor(Color(220, 138, 78))
       graphics.fillOval(
         (centerX - sunRadius).toInt,
         (centerY - sunRadius).toInt,

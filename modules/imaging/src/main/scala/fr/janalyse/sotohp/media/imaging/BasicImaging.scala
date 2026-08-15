@@ -115,6 +115,9 @@ case object BasicImaging {
     val fileType = fileTypeFromName(input).getOrElse("").toLowerCase
     if (fileType == "heif" || fileType == "heic") {
       loadWithImageMagick(input)
+    } else if (PortablePixmap.extensions.contains(fileType)) {
+      // ADDED : netpbm, the native output of the usual RAW converters, read without any library
+      PortablePixmap.read(input)
     } else {
       val image = ImageIO.read(input.toFile)
       if (image == null) throw new RuntimeException(s"Unsupported input image format : $input") // TODO enhance error support

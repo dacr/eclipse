@@ -28,6 +28,14 @@ class ShotTest extends munit.FunSuite {
     assertEquals(shot.metadataSources.map(_.getFileName.toString), List("IMG_0000.JPG", "IMG_0000.CR3"))
   }
 
+  test("a shot keeps a spare : if one of its files cannot be read, the other holds the same photo") {
+    val shot = Shot.group(pairs(1)).head
+    assertEquals(shot.pixelSources(preferRaw = true).map(_.getFileName.toString), List("IMG_0000.CR3", "IMG_0000.JPG"))
+    assertEquals(shot.pixelSources(preferRaw = false).map(_.getFileName.toString), List("IMG_0000.JPG", "IMG_0000.CR3"))
+    // and a shot written as a single file has only itself to offer
+    assertEquals(Shot.of(java.nio.file.Paths.get("/photos/IMG_0009.CR3")).pixelSources(preferRaw = true).size, 1)
+  }
+
   test("the extension case does not matter for the grouping") {
     val files = List("IMG_0001.CR3", "IMG_0001.jpg", "IMG_0002.cr3", "IMG_0002.JPG").map(name => Paths.get(s"/photos/$name"))
     val shots = Shot.group(files)

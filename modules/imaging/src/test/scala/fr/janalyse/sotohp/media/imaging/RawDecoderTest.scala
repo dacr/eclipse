@@ -40,6 +40,23 @@ class RawDecoderTest extends munit.FunSuite {
     assert(RawDecoder.RawDecodeConfig(halfSize = true).signature != upperCase.signature)
   }
 
+  test("each converter writes the format it does best, and that reads back") {
+    // the TIFF written by dcraw_emu is refused by the TIFF reader of the JVM, its netpbm is not
+    assertEquals(RawDecoder.RawTool.LibRaw.nativeOutputExtension, "ppm")
+    assert(PortablePixmap.extensions.contains(RawDecoder.RawTool.LibRaw.nativeOutputExtension))
+    // no converter is asked for TIFF any more, that is the format the JVM reader stumbles on
+    assertEquals(RawDecoder.RawTool.Darktable.nativeOutputExtension, "png")
+    assertEquals(RawDecoder.RawTool.RawTherapee.nativeOutputExtension, "png")
+    assertEquals(RawDecoder.RawTool.ImageMagick.nativeOutputExtension, "png")
+    assert(!RawDecoder.RawTool.values.exists(_.nativeOutputExtension.startsWith("tif")))
+  }
+
+  test("asking for another output format changes the cache key") {
+    val native = RawDecoder.RawDecodeConfig()
+    val tiff   = RawDecoder.RawDecodeConfig(outputExtension = Some("tiff"))
+    assert(native.signature != tiff.signature, "both would otherwise share the same cached files")
+  }
+
   test("a missing converter is reported as such rather than crashing") {
     val result = RawDecoder.decode(
       Paths.get("/nowhere/IMG_0001.CR3"),
