@@ -1,7 +1,7 @@
 package fr.janalyse.eclipse.composer
 
 import fr.janalyse.eclipse.composer.FrameSelector.{Selection, SelectionConfig}
-import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase}
+import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase, exposureValue}
 import fr.janalyse.sotohp.media.imaging.RawDecoder
 
 import java.nio.file.Path
@@ -38,7 +38,8 @@ object EclipseComposer {
         tileRadiusFactor = config.render.tileRadiusFactor,
         totalityTileRadiusFactor = config.render.totalityTileRadiusFactor
       )
-      val placements   = config.layout.place(selection.kept, layoutConfig)
+      val placed       = config.layout.place(selection.kept, layoutConfig)
+      val placements   = if (config.render.stackTotality) withTotalityBursts(placed, frames) else placed
       if (placements.isEmpty) Left("the layout could not place any frame")
       else
         CompositeRenderer
@@ -46,6 +47,58 @@ object EclipseComposer {
           .map(result => ComposeOutcome(result, selection, placements))
     }
   }
+
+  /** Hands each totality placement the whole burst it belongs to.
+    *
+    * During totality one does not take a picture, one takes a bracket : the long exposure reaches
+    * the outer corona, the short ones keep the prominences the long one burnt away. Choosing among
+    * them means giving up half of what was recorded, so the burst is passed on whole and merged at
+    * drawing time.
+    *
+    * A burst is recognized by time alone : frames of the same totality, taken within seconds of one
+    * another. Nothing else in a session looks like that.
+    */
+  def withTotalityBursts(
+    placements: Vector[Placement],
+    frames: Seq[FrameAnalysis],
+    withinSeconds: Long = 90L
+  ): Vector[Placement] = {
+    val totality = frames.filter(frame => frame.phase == FramePhase.Totality && frame.isUsable)
+    placements.map { placement =>
+      if (placement.frame.phase != FramePhase.Totality) placement
+      else
+        placement.frame.instant match {
+          case None          => placement
+          case Some(instant) =>
+            val burst = totality
+              .filter(_.instant.exists(other => math.abs(Duration.between(instant, other).getSeconds) <= withinSeconds))
+              .sortBy(_.instant.map(_.toEpochMilli).getOrElse(0L))
+              .toList
+            val chosen = oneFramePerExposure(burst, instant)
+            if (chosen.sizeIs > 1) placement.copy(stack = chosen) else placement
+        }
+    }
+  }
+
+  /** Keeps one frame per exposure level, the one closest in time to the reference.
+    *
+    * A burst holds repeats - three frames at the same shutter speed, then two at another - and they
+    * bring no dynamic range, only a little less noise. Worse, keeping them all widens the span of
+    * time being merged, and time is precisely what hurts here : the moon moves in front of the sun,
+    * so the further apart two frames are, the less their coronas line up. Keeping one frame per
+    * exposure, and the most central one at that, gives the same range over a shorter moment.
+    *
+    * Levels are told apart at a third of a stop, which is finer than anyone brackets.
+    */
+  def oneFramePerExposure(burst: List[FrameAnalysis], reference: java.time.Instant): List[FrameAnalysis] =
+    burst
+      .groupBy(frame => frame.metadata.exposureValue.map(value => math.round(value * 3d)).getOrElse(Long.MinValue))
+      .values
+      .flatMap { sameExposure =>
+        sameExposure.minByOption(_.instant.map(other => math.abs(Duration.between(reference, other).getSeconds)).getOrElse(Long.MaxValue))
+      }
+      .toList
+      .sortBy(_.instant.map(_.toEpochMilli).getOrElse(0L))
 
   /** Output scale : the requested disc radius fixes how many pixels a degree of sky is worth */
   def pixelsPerDegree(frames: Seq[FrameAnalysis], config: ComposeConfig): Double = {

@@ -129,6 +129,67 @@ class ComposerTest extends munit.FunSuite {
     assertEquals(capped.keptCount, 7) // three on each side, plus the maximum
   }
 
+  test("a totality burst is handed over whole to its placement") {
+    // the burst : several exposures within seconds of one another, as a real totality is shot
+    val plain  = session()
+    val middle = plain.size / 2
+    val frames = plain.zipWithIndex.map { case (frame, index) =>
+      if (index >= middle - 3 && index <= middle + 3)
+        // a real burst brackets its exposures : that is the whole point of shooting one
+        frame.copy(
+          disc = frame.disc.map(_.copy(phase = FramePhase.Totality, obscuration = Some(1d))),
+          metadata = frame.metadata.copy(
+            exposureTimeSeconds = Some(0.004d * math.pow(2d, (index - middle + 3).toDouble)),
+            aperture = Some(8d),
+            isoSensitivity = Some(100d)
+          )
+        )
+      else frame
+    }
+    val selection  = FrameSelector.select(frames)
+    val placements = SkyPathLayout().place(selection.kept, LayoutConfig(pixelsPerDegree = 300d))
+    val enriched   = EclipseComposer.withTotalityBursts(placements, frames, withinSeconds = 300L)
+
+    val totalityPlacement = enriched.find(_.frame.phase == FramePhase.Totality)
+    assert(totalityPlacement.isDefined, "the maximum should have been placed")
+    assertEquals(totalityPlacement.get.stack.size, 7)
+    // and the partial phases are left alone : there is nothing to merge there
+    assert(enriched.filter(_.frame.phase != FramePhase.Totality).forall(_.stack.isEmpty))
+  }
+
+  test("only one frame per exposure level is merged, the closest in time") {
+    // a real bracket : repeats at the same settings, and two ways of reaching the same exposure
+    val start = LocalDateTime.of(2026, 8, 12, 18, 30, 0).toInstant(ZoneOffset.UTC)
+    def shot(seconds: Long, time: Double, aperture: Double) = FrameAnalysis(
+      path = Paths.get(f"IMG_$seconds%04d.CR3"),
+      metadata = ShotMetadata.empty.copy(
+        shotAt = Some(start.plusSeconds(seconds).atOffset(ZoneOffset.UTC)),
+        exposureTimeSeconds = Some(time),
+        aperture = Some(aperture),
+        isoSensitivity = Some(100d)
+      ),
+      sun = None,
+      disc = None
+    )
+
+    val burst = List(
+      shot(0, 0.4d, 8d),      // three repeats of the long exposure
+      shot(4, 0.4d, 8d),
+      shot(8, 0.4d, 8d),
+      shot(20, 0.008d, 8d),   // the short one
+      shot(24, 0.05d, 2.8d)   // same exposure as 0.4s at f/8, by another route
+    )
+    val reference = start.plusSeconds(8)
+    val chosen    = EclipseComposer.oneFramePerExposure(burst, reference)
+
+    // two levels only : the long one - whichever aperture reached it - and the short one
+    assertEquals(chosen.size, 2)
+    val exposures = chosen.flatMap(_.metadata.exposureValue).map(value => math.round(value * 3d)).distinct
+    assertEquals(exposures.size, 2)
+    // and among the repeats, the one taken closest to the reference instant
+    assert(chosen.exists(_.name == "IMG_0008.CR3"), chosen.map(_.name).mkString(", "))
+  }
+
   test("selection by obscuration step spreads the eclipse progress evenly") {
     val kept = FrameSelector.selectByObscurationStep(session(), step = 0.1d)
     assert(kept.sizeIs >= 10, s"only ${kept.size} frames kept")

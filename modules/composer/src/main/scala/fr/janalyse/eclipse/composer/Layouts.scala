@@ -4,13 +4,18 @@ import fr.janalyse.eclipse.astro.TangentPlaneProjection
 import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase, HorizontalCoordinates}
 import fr.janalyse.sotohp.media.imaging.LinearAlgebra
 
-/** Where each selected frame lands on the composite */
+/** Where each selected frame lands on the composite
+  *
+  * @param stack other frames of the very same moment, shot at other exposures : a totality burst.
+  *              When there are any, they are merged into the tile rather than one of them chosen.
+  */
 final case class Placement(
   frame: FrameAnalysis,
   x: Double,
   y: Double,
   discRadiusPixels: Double,
-  tileRadiusPixels: Double
+  tileRadiusPixels: Double,
+  stack: List[FrameAnalysis] = Nil
 )
 
 final case class LayoutConfig(

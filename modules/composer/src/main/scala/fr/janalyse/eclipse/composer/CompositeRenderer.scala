@@ -1,10 +1,10 @@
 package fr.janalyse.eclipse.composer
 
-import fr.janalyse.eclipse.model.{FramePhase, PlateScale}
+import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase, PlateScale}
 import fr.janalyse.sotohp.media.imaging.CircleFitting.Circle
 import fr.janalyse.sotohp.media.imaging.Compositing.{BlendMode, Canvas}
 import fr.janalyse.sotohp.media.imaging.Rasters.RgbRaster
-import fr.janalyse.sotohp.media.imaging.{ColorBalance, Compositing, DiscMeasures, RawDecoder, ToneMapping}
+import fr.janalyse.sotohp.media.imaging.{ColorBalance, Compositing, DiscMeasures, ExposureStack, RawDecoder, ToneMapping}
 
 import java.awt.image.BufferedImage
 import java.awt.{Color, Font, RenderingHints}
@@ -24,6 +24,8 @@ final case class RenderConfig(
   featherRatio: Double = 0.25d,
   background: Color = Color.BLACK,
   marginPixels: Int = 80,
+  /** merges the whole bracket of a totality burst into one tile, rather than choosing one of them */
+  stackTotality: Boolean = true,
   /** measures the sky level around the subject and subtracts it, tile per tile */
   subtractSkyBackground: Boolean = true,
   /** cancels the color cast of the solar filter */
@@ -47,6 +49,8 @@ final case class CompositeReport(
   width: Int,
   height: Int,
   drawnFrameCount: Int,
+  /** how many tiles were merged from a bracket rather than drawn from a single exposure */
+  stackedFrameCount: Int,
   pixelsPerDegree: Double,
   fieldWidthDegrees: Double,
   fieldHeightDegrees: Double,
@@ -117,6 +121,7 @@ object CompositeRenderer {
 
       // --- tiles ------------------------------------------------------------------------------
       var drawn = 0
+      var stacked = 0
       scaled.zipWithIndex.foreach { case (placement, index) =>
         onProgress(index + 1, scaled.size)
         val frame = placement.frame
@@ -134,7 +139,9 @@ object CompositeRenderer {
             targetDiscRadiusPixels = placement.discRadiusPixels,
             radiusFactor = factor
           )
-          val ready  = adjust(tile.image, placement.discRadiusPixels, frame.phase, config)
+          val merged = if (placement.stack.sizeIs > 1) stackedTile(placement, factor, cacheDirectory, rawDecode, warnings) else None
+          if (merged.isDefined) stacked += 1
+          val ready  = merged.getOrElse(adjust(tile.image, placement.discRadiusPixels, frame.phase, config))
           val mask   = maskFor(masks, ready.getWidth, placement.discRadiusPixels, frame.phase, config)
           canvas.drawCenteredOn(ready, placement.x, placement.y, config.blendMode, Some(mask))
           if (config.annotateTimes) annotateTime(canvas, placement, config)
@@ -174,6 +181,7 @@ object CompositeRenderer {
             width = width,
             height = height,
             drawnFrameCount = drawn,
+            stackedFrameCount = stacked,
             pixelsPerDegree = pixelsPerDegree,
             fieldWidthDegrees = fieldWidth,
             fieldHeightDegrees = fieldHeight,
@@ -186,6 +194,98 @@ object CompositeRenderer {
       )
     }
   }
+
+  /** Merges a totality bracket into a single tile.
+    *
+    * Each exposure is cut out around *its own* measured disc, so the frames land on top of one
+    * another whatever the sun was doing in the frame - the alignment is free, it comes from the
+    * measurement that was made anyway. They are then merged on the strength of their exposure
+    * values, and stretched hard : a corona falls off by orders of magnitude from the limb outwards.
+    */
+  private def stackedTile(
+    placement: Placement,
+    radiusFactor: Double,
+    cacheDirectory: Path,
+    rawDecode: RawDecoder.RawDecodeConfig,
+    warnings: mutable.Builder[String, List[String]]
+  ): Option[java.awt.image.BufferedImage] = {
+    // One radius for the whole burst. The moon does not change size in the half minute a bracket
+    // takes, so the small differences between the measured radii are measurement artefacts - the
+    // bright inner corona eats into the edge on the long exposures. Scaling each frame by its own
+    // radius would stretch them differently and leave a coloured seam around the moon.
+    val radii        = placement.stack.flatMap(_.disc).map(_.radiusPixels).sorted
+    val commonRadius = if (radii.isEmpty) 0d else radii(radii.size / 2)
+
+    val exposures = placement.stack.flatMap { frame =>
+      for {
+        disc     <- frame.disc
+        exposure <- relativeExposure(frame)
+        if commonRadius > 0d
+        image    <- RawDecoder.load(frame.path, cacheDirectory, rawDecode).toOption
+      } yield {
+        val tile = Compositing.extractTile(
+          image = image,
+          disc = Circle(disc.centerX, disc.centerY, commonRadius),
+          targetDiscRadiusPixels = placement.discRadiusPixels,
+          radiusFactor = radiusFactor
+        )
+        ExposureStack.Exposure(RgbRaster.fromImage(tile.image), exposure)
+      }
+    }
+
+    if (exposures.sizeIs < 2) {
+      warnings += s"${placement.frame.name} : the totality burst could not be merged, a single exposure was usable"
+      None
+    } else {
+      val spread = exposures.map(_.relativeExposure).max / exposures.map(_.relativeExposure).min
+      ExposureStack.merge(exposures).map { merged =>
+        warnings += f"${placement.frame.name} : ${exposures.size} exposures merged, spanning ${math.log(spread) / math.log(2d)}%.1f stops"
+        blackenMoon(ExposureStack.display(merged), placement.discRadiusPixels).toImage
+      }
+    }
+  }
+
+  /** Puts the moon back to black at the middle of a merged tile.
+    *
+    * The moon moves in front of the sun - about fifteen pixels over the half minute a bracket takes
+    * - so frames stacked on the lunar edge no longer line up on the corona, which then spills a
+    * bright crescent over the dark disc. Whatever ends up inside that disc is an artefact one way
+    * or another : the moon emits nothing. The fade stops just short of the edge so that the
+    * prominences, which stand right outside it, are left untouched.
+    */
+  private def blackenMoon(tile: RgbRaster, moonRadius: Double, feather: Double = 0.03d): RgbRaster = {
+    val centerX = tile.width / 2d
+    val centerY = tile.height / 2d
+    val inner   = moonRadius * (1d - feather)
+    val red     = tile.red.clone()
+    val green   = tile.green.clone()
+    val blue    = tile.blue.clone()
+    var y       = 0
+    while (y < tile.height) {
+      var x = 0
+      while (x < tile.width) {
+        val distance = math.hypot(x + 0.5d - centerX, y + 0.5d - centerY)
+        if (distance < moonRadius) {
+          val keep  = if (distance <= inner) 0f else ((distance - inner) / (moonRadius - inner)).toFloat
+          val index = y * tile.width + x
+          red(index) = red(index) * keep
+          green(index) = green(index) * keep
+          blue(index) = blue(index) * keep
+        }
+        x += 1
+      }
+      y += 1
+    }
+    RgbRaster(tile.width, tile.height, red, green, blue)
+  }
+
+  /** How much light the settings let in, in units that only matter relative to one another */
+  private def relativeExposure(frame: FrameAnalysis): Option[Double] =
+    for {
+      time     <- frame.metadata.exposureTimeSeconds
+      aperture  = frame.metadata.aperture.getOrElse(8d)
+      if time > 0d && aperture > 0d
+    } yield time * frame.metadata.isoSensitivity.getOrElse(100d) / (aperture * aperture)
 
   /** Color cast removal and brightness normalization, so that frames shot through a very dense
     * filter and frames shot without any filter at all can live in the same picture.

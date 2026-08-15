@@ -237,6 +237,7 @@ object Main {
       List(
         s"layout                : ${config.layout.name}",
         s"frames drawn          : ${report.drawnFrameCount} of ${outcome.selection.candidateCount}",
+        if (report.stackedFrameCount > 0) s"exposure brackets     : ${report.stackedFrameCount} tile(s) merged from several exposures" else "",
         s"composite             : ${report.width} x ${report.height} px",
         f"field covered         : ${report.fieldWidthDegrees}%.2f° x ${report.fieldHeightDegrees}%.2f°",
         f"equivalent lens       : ${report.equivalentFullFrameFocalLengthMillimeters}%.0f mm on 24x36",

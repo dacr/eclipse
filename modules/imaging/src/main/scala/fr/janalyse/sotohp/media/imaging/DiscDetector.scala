@@ -362,20 +362,95 @@ object DiscDetector {
     }
     if (total <= 0d) Left("no corona signal found")
     else {
-      val radius = config.expectedRadiusPixels.getOrElse(math.sqrt(mask.count / math.Pi))
-      Right(
-        DiscDetection(
-          circle = Circle(totalX / total, totalY / total, radius),
-          kind = DiscKind.Corona,
-          boundaryPointCount = 0,
-          inlierCount = mask.count,
-          residualRms = 0d,
-          radialSpread = 0d,
-          thresholdLevel = threshold,
-          limbContrast = 0d, // no limb : that is precisely why this branch was taken
-          coverage = mask.coverage
-        )
-      )
+      val weighted = (totalX / total, totalY / total)
+      val fallback = config.expectedRadiusPixels.getOrElse(math.sqrt(mask.count / math.Pi))
+
+      // The brightness weighted center is only a starting point : how far the corona reaches
+      // depends on the exposure, so on a bracket that center drifts from one frame to the next and
+      // the frames no longer stack. The edge of the moon does not drift - it is a sharp, dark disc
+      // - so it is measured, and that is what the frames are aligned on.
+      moonEdge(raster, weighted, fallback, config) match {
+        case Some((circle, points)) =>
+          Right(
+            DiscDetection(
+              circle = circle,
+              kind = DiscKind.Corona,
+              boundaryPointCount = points.size,
+              inlierCount = points.size,
+              residualRms = CircleFitting.residualRms(circle, points),
+              radialSpread = CircleFitting.radialSpread(circle, points),
+              thresholdLevel = threshold,
+              limbContrast = 0d, // no photosphere limb : that is precisely why this branch was taken
+              coverage = mask.coverage
+            )
+          )
+
+        case None =>
+          Right(
+            DiscDetection(
+              circle = Circle(weighted._1, weighted._2, fallback),
+              kind = DiscKind.Corona,
+              boundaryPointCount = 0,
+              inlierCount = mask.count,
+              residualRms = 0d,
+              radialSpread = 0d,
+              thresholdLevel = threshold,
+              limbContrast = 0d,
+              coverage = mask.coverage
+            )
+          )
+      }
+    }
+  }
+
+  /** The dark disc of the moon, measured from inside the corona.
+    *
+    * Rays leave the middle and stop where the brightness first rises to half way between the dark
+    * middle and the brightest ring around it. That crossing is the lunar edge, and it sits at the
+    * same place whatever exposure the frame was given - which is what makes a bracket stackable.
+    */
+  private def moonEdge(
+    raster: GrayRaster,
+    origin: (Double, Double),
+    expectedRadius: Double,
+    config: DiscDetectorConfig
+  ): Option[(Circle, Seq[Point])] = {
+    val reach = expectedRadius * 1.6d
+    val step  = math.max(0.5d, reach / 200d)
+
+    def levelAround(from: Double, to: Double): Double = {
+      val samples = for {
+        index <- 0 until 360
+        angle  = math.Pi * 2d * index / 360d
+        radius <- Iterator.iterate(from)(_ + step).takeWhile(_ <= to).toSeq
+      } yield sample(raster, origin._1 + math.cos(angle) * radius, origin._2 + math.sin(angle) * radius)
+      if (samples.isEmpty) 0d else samples.sum / samples.size
+    }
+
+    val middle = levelAround(0d, expectedRadius * 0.4d)
+    val ring   = levelAround(expectedRadius * 1.05d, expectedRadius * 1.3d)
+    if (ring - middle < 1e-4d) None
+    else {
+      val halfHeight = (middle + ring) / 2d
+      val points     = (0 until config.rayCount).flatMap { index =>
+        val angle      = math.Pi * 2d * index / config.rayCount
+        val directionX = math.cos(angle)
+        val directionY = math.sin(angle)
+        var radius     = expectedRadius * 0.3d
+        var crossing   = -1d
+        while (radius <= reach && crossing < 0d) {
+          if (sample(raster, origin._1 + directionX * radius, origin._2 + directionY * radius) >= halfHeight) crossing = radius
+          radius += step
+        }
+        Option.when(crossing > 0d)(Point(origin._1 + directionX * crossing, origin._2 + directionY * crossing))
+      }
+
+      if (points.sizeIs < 16) None
+      else
+        CircleFitting
+          .algebraicFit(points)
+          .filter(circle => circle.radius > expectedRadius * 0.4d && circle.radius < expectedRadius * 1.6d)
+          .map(circle => (circle, points))
     }
   }
 
