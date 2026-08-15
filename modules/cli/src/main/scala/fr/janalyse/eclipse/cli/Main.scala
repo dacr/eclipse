@@ -1,5 +1,6 @@
 package fr.janalyse.eclipse.cli
 
+import fr.janalyse.eclipse.astro.Refraction
 import fr.janalyse.eclipse.composer.*
 import fr.janalyse.eclipse.composer.FrameSelector.SelectionConfig
 import fr.janalyse.eclipse.frames.{FrameAnalysisConfig, FrameAnalyzer, Shot}
@@ -136,13 +137,16 @@ object Main {
                 val marked   = BasicImaging.convertTo(image, java.awt.image.BufferedImage.TYPE_INT_RGB)
                 val graphics = marked.createGraphics
                 try {
+                  // the outline is drawn as it was measured : squashed when refraction squashed it,
+                  // so that what the detector found can be compared with what the frame shows
+                  val verticalRadius = disc.radiusPixels * (1d - disc.flattening)
                   graphics.setStroke(java.awt.BasicStroke(math.max(2f, disc.radiusPixels.toFloat / 60f)))
                   graphics.setColor(java.awt.Color.GREEN)
                   graphics.drawOval(
                     (disc.centerX - disc.radiusPixels).toInt,
-                    (disc.centerY - disc.radiusPixels).toInt,
+                    (disc.centerY - verticalRadius).toInt,
                     (disc.radiusPixels * 2).toInt,
-                    (disc.radiusPixels * 2).toInt
+                    (verticalRadius * 2).toInt
                   )
                   val arm = (disc.radiusPixels / 4).toInt
                   graphics.setColor(java.awt.Color.RED)
@@ -153,9 +157,14 @@ object Main {
                 BasicImaging.save(output, BasicImaging.fitWithin(marked, options.int("inspect-size").getOrElse(1400)))
                 output
               }
+            val expected = frame.sun
+              .map(sun => Refraction.flattening(sun.geometric.altitudeDegrees, sun.semiDiameterDegrees))
+              .map(value => f" (refraction predicts ${value * 100}%.1f%%)")
+              .getOrElse("")
             f"${shot.name} : ${disc.phase} center=(${disc.centerX}%.1f,${disc.centerY}%.1f) r=${disc.radiusPixels}%.1f " +
               f"residual=${disc.fitResidualPixels}%.2fpx confidence=${disc.detectionConfidence}%.2f " +
               f"limbContrast=${disc.limbContrast}%.2f room=${disc.roomFactor.getOrElse(0d)}%.2f " +
+              f"flattening=${disc.flattening * 100}%.1f%%$expected " +
               drawn.map(path => s"-> $path").getOrElse("(image not drawn)")
         }
       }
@@ -418,7 +427,7 @@ object Main {
       "out", "cache", "observer", "parallelism", "pressure", "temperature",
       "layout", "disc-radius", "separation", "tile-factor", "totality-factor",
       "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin", "min-confidence",
-      "frames-per-side"
+      "frames-per-side", "inspect-size"
     )
 
     def parse(arguments: List[String]): Options = {

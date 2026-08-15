@@ -44,7 +44,9 @@ object FrameStore {
     "limbContrast",
     "signalRadius",
     "roomFactor",
-    "issues"
+    "issues",
+    // appended rather than inserted, so that measurements written before it stay readable
+    "flattening"
   )
 
   def toCsv(frames: Seq[FrameAnalysis]): String = {
@@ -75,7 +77,8 @@ object FrameStore {
         disc.map(_.limbContrast.toString).getOrElse(""),
         disc.flatMap(_.signalRadiusPixels).map(_.toString).getOrElse(""),
         disc.flatMap(_.roomFactor).map(_.toString).getOrElse(""),
-        frame.issues.mkString(" | ")
+        frame.issues.mkString(" | "),
+        disc.map(_.flattening.toString).getOrElse("")
       ).map(escape).mkString(";")
     }
     (header.mkString(";") +: lines).mkString("\n") + "\n"
@@ -162,7 +165,8 @@ object FrameStore {
       detectionConfidence = number(19).getOrElse(1d),
       limbContrast = number(20).getOrElse(0d),
       signalRadiusPixels = number(21),
-      roomFactor = number(22)
+      roomFactor = number(22),
+      flattening = number(24).getOrElse(0d)
     )
 
     Record(

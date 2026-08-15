@@ -141,4 +141,26 @@ object Refraction {
       (conditions.pressureHectoPascals / 1010d) * (283d / (273d + conditions.temperatureCelsius))
     arcMinutes * factor / 60d
   }
+
+  /** How much a disc of the given size is squashed at the given altitude, 0 when round.
+    *
+    * Refraction lifts the lower limb of the sun more than its upper one, so the disc loses height
+    * without losing width : about 6 % of its diameter two degrees above the horizon, 2 % at five,
+    * and a good third of it when it touches the horizon. This is the shape a low sun really has,
+    * and what the elliptical fit of the detector is expected to find - which makes the measurement
+    * checkable against physics rather than against a tolerance.
+    *
+    * @param trueAltitudeDegrees altitude of the disc center, before refraction
+    */
+  def flattening(
+    trueAltitudeDegrees: Double,
+    semiDiameterDegrees: Double = 0.266d,
+    conditions: AtmosphericConditions = AtmosphericConditions()
+  ): Double =
+    if (semiDiameterDegrees <= 0d) 0d
+    else {
+      val lower = correctionDegrees(trueAltitudeDegrees - semiDiameterDegrees, conditions)
+      val upper = correctionDegrees(trueAltitudeDegrees + semiDiameterDegrees, conditions)
+      math.max(0d, (lower - upper) / (2d * semiDiameterDegrees))
+    }
 }

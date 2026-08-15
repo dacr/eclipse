@@ -497,7 +497,8 @@ object FrameAnalyzer {
       detectionConfidence = confidenceOf(detection),
       limbContrast = detection.limbContrast,
       signalRadiusPixels = signalRadius,
-      roomFactor = room
+      roomFactor = room,
+      flattening = detection.flattening
     )
   }
 

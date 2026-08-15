@@ -38,6 +38,15 @@ object DiscDetector {
     expectedRadiusPixels: Option[Double] = None,
     /** how far the freely measured radius may stray from the expected one before it is imposed */
     radiusTolerance: Double = 0.25d,
+    /** the most a disc may be squashed before the shape is taken for a mistake rather than for
+      * refraction : six percent is what two degrees of altitude give, twice that is already below
+      * the horizon
+      */
+    maximumFlattening: Double = 0.25d,
+    /** how much of the outline the boundary points must cover before an ellipse - four free
+      * parameters instead of three - may be fitted to them
+      */
+    minimumAngularCoverage: Double = 0.55d,
     /** where the subject is expected to be, typically propagated from the previous frame of a
       * sequence : it is used as the origin of the rays and to focus the corona centroid, and it is
       * silently ignored when it does not land on the subject - a re-framing, a cloud, a mistake
@@ -63,7 +72,9 @@ object DiscDetector {
     radialSpread: Double,
     thresholdLevel: Double,
     limbContrast: Double,
-    coverage: Double
+    coverage: Double,
+    /** how much the disc is squashed vertically, 0 when it was measured as a circle */
+    flattening: Double = 0d
   )
 
   /** Detects the subject on a full resolution image.
@@ -245,7 +256,7 @@ object DiscDetector {
             iterations = config.fitIterations,
             minimumInlierRatio = config.minimumInlierRatio
           )
-          .map { case (circle, inliers) => (circle, inliers, points.size) }
+          .map { case (circle, inliers) => (circle, inliers, points) }
 
     /** The expected radius is a safety net, never a straitjacket.
       *
@@ -273,23 +284,91 @@ object DiscDetector {
     }
 
     second.orElse(first) match {
-      case None                             => Left("outer limb fit failed")
+      case None                              => Left("outer limb fit failed")
       case Some((circle, inliers, sampled)) =>
+        val (shape, shapeInliers, flattening) = squashed(circle, inliers, sampled, config)
         Right(
           DiscDetection(
-            circle = circle,
+            circle = shape,
             kind = DiscKind.Photosphere,
-            boundaryPointCount = sampled,
-            inlierCount = inliers.size,
-            residualRms = CircleFitting.residualRms(circle, inliers),
-            radialSpread = CircleFitting.radialSpread(circle, inliers),
+            boundaryPointCount = sampled.size,
+            inlierCount = shapeInliers.size,
+            residualRms = residualOf(shape, shapeInliers, flattening),
+            radialSpread = spreadOf(shape, shapeInliers, flattening),
             thresholdLevel = threshold,
-            limbContrast = limbContrastAcross(raster, circle, inliers, range, config),
-            coverage = mask.coverage
+            limbContrast = limbContrastAcross(raster, shape, shapeInliers, range, config),
+            coverage = mask.coverage,
+            flattening = flattening
           )
         )
     }
   }
+
+  /** Refits the limb as an ellipse when the disc turns out not to be round.
+    *
+    * A sun a couple of degrees above the horizon is squashed by refraction, and a circle simply
+    * cannot pass through such an outline : it splits the difference, leaves a residual of several
+    * percent of the radius, and the frame gets thrown out for a bad measurement although its limb
+    * was perfectly visible. That is what emptied the end of a real session, the last twenty minutes
+    * of it, and left a hole in the composite.
+    *
+    * The ellipse is only kept when it earns its extra parameter : the outline has to be covered
+    * widely enough to pin four of them down, the shape has to be squashed the way the atmosphere
+    * squashes - vertically, and by a plausible amount - and the points have to scatter clearly less
+    * around it than around the circle. Otherwise the circle stands, which is what happens for the
+    * whole first part of a session.
+    */
+  private def squashed(
+    circle: Circle,
+    inliers: Seq[Point],
+    sampled: Seq[Point],
+    config: DiscDetectorConfig
+  ): (Circle, Seq[Point], Double) = {
+    val unchanged = (circle, inliers, 0d)
+    if (config.maximumFlattening <= 0d) unchanged
+    else {
+      // the ellipse is fitted against every boundary point, not against the inliers the circle kept
+      // : those are precisely the points a circle could pass through, so the squashed part of the
+      // outline has already been dropped from them
+      val seed = EllipseFitting.Ellipse(circle.centerX, circle.centerY, circle.radius, circle.radius)
+      EllipseFitting
+        .robustOuterFit(
+          points = sampled,
+          seed = seed,
+          rejectionRatio = 0.03d,
+          seedRejectionRatio = 0.03d + config.maximumFlattening,
+          minimumInlierRatio = config.minimumInlierRatio
+        )
+        .filter { case (ellipse, points) =>
+          // the two shapes are judged on the same points, otherwise the circle would be flattered
+          // by having been allowed to choose which ones it had to pass through
+          val circleSpread  = CircleFitting.radialSpread(circle, points)
+          val ellipseSpread = EllipseFitting.radialSpread(ellipse, points)
+          val sizeShift     = math.abs(ellipse.semiHorizontal - circle.radius) / circle.radius
+          ellipse.flattening > 0.01d &&
+          ellipse.flattening <= config.maximumFlattening &&
+          sizeShift <= 0.3d &&
+          ellipseSpread < circleSpread * 0.8d &&
+          EllipseFitting.angularCoverage(points, ellipse.centerX, ellipse.centerY) >= config.minimumAngularCoverage
+        }
+        .map { case (ellipse, points) => (ellipse.asCircle, points, ellipse.flattening) }
+        .getOrElse(unchanged)
+    }
+  }
+
+  /** The measured shape as an ellipse again - the detection only carries a circle and how squashed
+    * it is, which is all the rest of the pipeline needs, but judging the fit needs the shape back
+    */
+  private def shapeOf(circle: Circle, flattening: Double): EllipseFitting.Ellipse =
+    EllipseFitting.Ellipse(circle.centerX, circle.centerY, circle.radius, circle.radius * (1d - flattening))
+
+  private def residualOf(circle: Circle, points: Seq[Point], flattening: Double): Double =
+    if (flattening <= 0d) CircleFitting.residualRms(circle, points)
+    else EllipseFitting.residualRms(shapeOf(circle, flattening), points)
+
+  private def spreadOf(circle: Circle, points: Seq[Point], flattening: Double): Double =
+    if (flattening <= 0d) CircleFitting.radialSpread(circle, points)
+    else EllipseFitting.radialSpread(shapeOf(circle, flattening), points)
 
   /** How abruptly the brightness falls across the fitted edge, between 0 and 1.
     *
@@ -317,14 +396,18 @@ object DiscDetector {
       val near      = config.limbContrastSpan
       val far       = near * 4d
       val sharpness = inliers.flatMap { point =>
+        // the edge is where the point is, not where the radius says : on a disc squashed by
+        // refraction those two differ by several percent near the top and the bottom of the limb,
+        // enough to measure the sky instead of the edge
+        val edge       = circle.distanceToCenter(point.x, point.y)
         val angle      = math.atan2(point.y - circle.centerY, point.x - circle.centerX)
         val directionX = math.cos(angle)
         val directionY = math.sin(angle)
         def at(distance: Double) =
           sample(raster, circle.centerX + directionX * distance, circle.centerY + directionY * distance)
 
-        val nearDrop = at(circle.radius - near) - at(circle.radius + near)
-        val farDrop  = at(circle.radius - far) - at(circle.radius + far)
+        val nearDrop = at(edge - near) - at(edge + near)
+        val farDrop  = at(edge - far) - at(edge + far)
         // an edge worth judging has to drop at all, and by something above the noise
         Option.when(farDrop > range * 0.02d)(math.max(0d, math.min(1d, nearDrop / farDrop)))
       }.sorted
@@ -465,7 +548,15 @@ object DiscDetector {
     range: Double,
     config: DiscDetectorConfig
   ): Seq[EdgeSample] = {
-    val maximumRadius = List(originX, originY, mask.width - originX, mask.height - originY).max
+    // A ray reports the farthest lit sample it meets, which is what lets it find the limb through
+    // the gaps a thin crescent leaves. Near the horizon that generosity backfires : the haze around
+    // the sun is lit too, hundreds of pixels out, and the ray stops there instead of on the limb.
+    // The fit then comes back with a sun twice its ephemeris size, gets refused for that, and the
+    // frame is lost. So when the expected size is known the rays are not allowed to look further
+    // than a disc could possibly reach - counting from an origin which, on a crescent, sits on the
+    // occulting body rather than on the sun.
+    val reach         = List(originX, originY, mask.width - originX, mask.height - originY).max
+    val maximumRadius = config.expectedRadiusPixels.fold(reach)(expected => math.min(reach, expected * 2.5d))
     (0 until config.rayCount).flatMap { rayIndex =>
       val angle       = 2d * math.Pi * rayIndex / config.rayCount
       val directionX  = math.cos(angle)

@@ -67,6 +67,18 @@ class SolarEphemerisTest extends munit.FunSuite {
     assert(Refraction.correctionDegrees(5d, AtmosphericConditions(900d, 10d)) < Refraction.correctionDegrees(5d, standard))
   }
 
+  test("refraction squashes the disc, and only near the horizon") {
+    // this is what the elliptical fit of the detector is expected to find on the last frames of a
+    // sunset eclipse, so it is worth having the physics written down next to it
+    assert(Refraction.flattening(45d) < 0.002d, "high in the sky the sun stays round")
+    assertEqualsDouble(Refraction.flattening(5d), 0.024d, 0.006d)
+    assertEqualsDouble(Refraction.flattening(2d), 0.065d, 0.015d)
+    assert(Refraction.flattening(0d) > 0.12d, "on the horizon the squashing is plain to see")
+    // and it only ever grows as the sun goes down
+    val altitudes = List(30d, 20d, 10d, 5d, 3d, 2d, 1d, 0d)
+    assertEquals(altitudes.map(Refraction.flattening(_)), altitudes.map(Refraction.flattening(_)).sorted)
+  }
+
   test("angular distance between two directions of the sky") {
     val zenith = HorizontalCoordinates(0d, 90d)
     val south  = HorizontalCoordinates(180d, 30d)

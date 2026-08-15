@@ -154,7 +154,12 @@ final case class MeasuredDisc(
   /** how far the subject actually shines, in pixels : the corona extent on a totality frame */
   signalRadiusPixels: Option[Double] = None,
   /** how much room there is around the disc before reaching the frame border, in disc radius units */
-  roomFactor: Option[Double] = None
+  roomFactor: Option[Double] = None,
+  /** how much the disc was found squashed vertically, which refraction does near the horizon : 0 on
+    * a round disc, around 0.06 two degrees above it. `radiusPixels` stays the horizontal half width,
+    * the one refraction leaves alone, so it remains the true angular size.
+    */
+  flattening: Double = 0d
 )
 
 /** Image scale, the bridge between the sky and the sensor */
