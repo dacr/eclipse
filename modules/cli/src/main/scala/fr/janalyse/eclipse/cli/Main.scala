@@ -65,6 +65,8 @@ object Main {
       |  --background-roll <deg>   camera roll, positive when its horizon runs down to the right
       |  --background-sun <x,y>    where the sun is on it, when it cannot be found by itself
       |  --background-scale <px/°> its plate scale, when its metadata does not give the optics
+      |  --background-redraw       draws a tile over the sun of the background too, which is
+      |                            otherwise left alone : it is the same sun as the sequence's
       |""".stripMargin
 
   def main(args: Array[String]): Unit = {
@@ -187,7 +189,7 @@ object Main {
       frames     <- loadFrames(options)
       background <- backgroundOf(options, frames)
       tuned       = tuning(options, frames, background)
-      config      = composeConfig(options, tuned, background.map(_.background))
+      config      = composeConfig(options, tuned, background)
     } yield {
       val selection       = FrameSelector.select(frames, config.selection)
       val pixelsPerDegree = EclipseComposer.pixelsPerDegree(frames, config)
@@ -227,6 +229,9 @@ object Main {
             case 0     => ", none of them during totality"
             case count => s", $count of them during totality"
           }),
+        if (selection.rejectedForScenery > 0)
+          s"left to the scenery   : ${selection.rejectedForScenery} frames, the background already shows the sun where they would have landed"
+        else "",
         FrameSelector.representativeMaximum(frames.filter(_.isUsable)).instant match {
           case None          => ""
           case Some(maximum) =>
@@ -251,7 +256,7 @@ object Main {
       background <- backgroundOf(options, frames)
       _           = background.foreach(_.report.foreach(line => Console.err.println(s"background : $line")))
       tuned       = tuning(options, frames, background)
-      config      = composeConfig(options, tuned, background.map(_.background))
+      config      = composeConfig(options, tuned, background)
       _           = tuned.explanations.foreach(explanation => Console.err.println(s"automatic : $explanation"))
       outcome    <- EclipseComposer.compose(
                       frames,
@@ -308,6 +313,16 @@ object Main {
 
   private def backgroundMarginDegrees(options: Options): Double = options.double("background-margin").getOrElse(4d)
 
+  /** The sun standing in the scenery, so that no tile gets drawn on top of it.
+    *
+    * The wide angle frame was taken during the session : its sun is one of the suns of the sequence,
+    * and the composite shows it already. `--background-redraw` puts the tile back for whoever
+    * prefers the measured disc over the one the landscape recorded.
+    */
+  private def occupiedSky(options: Options, background: Option[SkyBackground.Loaded]): List[FrameSelector.OccupiedSky] =
+    if (options.flag("background-redraw")) Nil
+    else background.map(loaded => FrameSelector.OccupiedSky(loaded.sun.apparent, loaded.sun.semiDiameterDegrees)).toList
+
   /** Reads the wide angle frame given as scenery, and works out where it was aimed.
     *
     * The session it belongs to hands it what its own metadata does not carry : where the camera
@@ -350,11 +365,16 @@ object Main {
           separationFactor = options.double("separation").getOrElse(1.05d),
           balanced = options.flag("balanced") || options.int("frames-per-side").isDefined,
           framesPerSide = options.int("frames-per-side"),
-          extraFieldDegrees = if (background.isDefined) backgroundMarginDegrees(options) else 0d
+          extraFieldDegrees = if (background.isDefined) backgroundMarginDegrees(options) else 0d,
+          occupied = occupiedSky(options, background)
         )
       )
 
-  private def composeConfig(options: Options, tuned: AutoTuner.Tuning, background: Option[SkyBackground]): ComposeConfig =
+  private def composeConfig(
+    options: Options,
+    tuned: AutoTuner.Tuning,
+    background: Option[SkyBackground.Loaded]
+  ): ComposeConfig =
     ComposeConfig(
       cacheDirectory = cacheDirectory(options),
       selection = SelectionConfig(
@@ -363,7 +383,8 @@ object Main {
         totalityTileRadiusFactor = options.double("totality-factor").getOrElse(tuned.selection.totalityTileRadiusFactor),
         minimumConfidence = options.double("min-confidence").getOrElse(tuned.selection.minimumConfidence),
         balanced = options.flag("balanced") || options.int("frames-per-side").isDefined,
-        framesPerSide = options.int("frames-per-side")
+        framesPerSide = options.int("frames-per-side"),
+        occupied = occupiedSky(options, background)
       ),
       layout = options.value("layout") match {
         case Some("sky-path-even") => SkyPathLayout(evenSpacing = true)
@@ -389,7 +410,7 @@ object Main {
         annotateTimes = options.flag("annotate"),
         caption = options.value("caption"),
         captionZoneId = ZoneOffset.UTC,
-        background = background,
+        background = background.map(_.background),
         backgroundMarginDegrees = backgroundMarginDegrees(options)
       )
     )

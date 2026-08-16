@@ -34,7 +34,9 @@ object AutoTuner {
     /** sky kept around the sequence beyond the frames themselves, to show a background : the scale
       * has to be chosen for the canvas which will actually be drawn, not for the sequence alone
       */
-    extraFieldDegrees: Double = 0d
+    extraFieldDegrees: Double = 0d,
+    /** suns the background already shows, which no tile may be drawn on top of */
+    occupied: List[FrameSelector.OccupiedSky] = Nil
   )
 
   final case class Tuning(
@@ -101,10 +103,13 @@ object AutoTuner {
         tileRadiusFactor = tileRadiusFactor,
         totalityTileRadiusFactor = totalityTileRadiusFactor,
         balanced = intent.balanced,
-        framesPerSide = intent.framesPerSide
+        framesPerSide = intent.framesPerSide,
+        occupied = intent.occupied
       )
       val selected  = FrameSelector.select(usable, selection)
       explanations += s"${selected.keptCount} frames kept out of ${usable.size}, spaced so that no two discs touch"
+      if (selected.rejectedForScenery > 0)
+        explanations += s"${selected.rejectedForScenery} frames left undrawn, the background already shows the sun where they would have landed"
 
       val layout =
         if (EclipseComposer.pathLengthDegrees(usable) > 2d) SkyPathLayout()

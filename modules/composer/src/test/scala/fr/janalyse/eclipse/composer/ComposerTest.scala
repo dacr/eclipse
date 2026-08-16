@@ -47,6 +47,31 @@ class ComposerTest extends munit.FunSuite {
     assert(step < diameter / 4d, s"the sun moves $step° between two shots, way less than its $diameter° diameter")
   }
 
+  test("no tile is drawn where the scenery already shows the sun") {
+    val frames    = session()
+    val plain     = SelectionConfig(separationFactor = 1.05d, tileRadiusFactor = 1.5d, totalityTileRadiusFactor = 3d)
+    // the wide angle frame was taken at the very end of the session, so its sun stands where the
+    // last frames of the sequence would have landed
+    val landscape = frames.last.sun.get
+    val config    = plain.copy(occupied = List(FrameSelector.OccupiedSky(landscape.apparent, landscape.semiDiameterDegrees)))
+
+    val withScenery = FrameSelector.select(frames, config)
+    assert(withScenery.rejectedForScenery > 0, "the frames landing on that sun should have been left out")
+    assert(withScenery.keptCount < FrameSelector.select(frames, plain).keptCount, "one tile fewer at least")
+
+    val required = (FrameSelector.tileRadiusDegrees(frames.last, config) +
+      landscape.semiDiameterDegrees * config.tileRadiusFactor) * config.separationFactor
+    withScenery.kept.foreach { frame =>
+      val distance = frame.position.get.angularDistanceTo(landscape.apparent)
+      assert(distance >= required * 0.999d, f"a tile lands $distance%.4f° from the sun of the scenery, $required%.4f° needed")
+    }
+  }
+
+  test("without a scenery nothing is left out for it") {
+    val selection = FrameSelector.select(session(), SelectionConfig())
+    assertEquals(selection.rejectedForScenery, 0)
+  }
+
   test("selection keeps the discs apart") {
     val frames    = session()
     val config    = SelectionConfig(separationFactor = 1.05d, tileRadiusFactor = 1.5d, totalityTileRadiusFactor = 3d)

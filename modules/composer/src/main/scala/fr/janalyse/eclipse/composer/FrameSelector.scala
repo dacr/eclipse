@@ -1,6 +1,6 @@
 package fr.janalyse.eclipse.composer
 
-import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase}
+import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase, HorizontalCoordinates}
 
 /** Which frames end up in the composite.
   *
@@ -17,6 +17,15 @@ object FrameSelector {
     case Last
     case MaximumEclipse
   }
+
+  /** A sun the composite already shows without drawing it.
+    *
+    * The wide angle frame used as scenery holds one : it was taken during the session, so its sun is
+    * one of the suns of the sequence, at its own instant and in its own place. Drawing a tile on top
+    * of it would show the same sun twice, a few seconds apart and rendered differently - which is
+    * exactly the smear the whole selection exists to avoid.
+    */
+  final case class OccupiedSky(position: HorizontalCoordinates, semiDiameterDegrees: Double)
 
   final case class SelectionConfig(
     /** minimum gap between two neighbour tiles, 1.0 means tiles just touching, 1.1 leaves 10% air */
@@ -37,14 +46,18 @@ object FrameSelector {
     /** hard limit on the number of frames kept on each side of the maximum */
     framesPerSide: Option[Int] = None,
     /** drop frames whose measurement is doubtful */
-    minimumConfidence: Double = 0.2d
+    minimumConfidence: Double = 0.2d,
+    /** suns the composite shows already, without a tile being drawn for them */
+    occupied: List[OccupiedSky] = Nil
   )
 
   final case class Selection(
     kept: List[FrameAnalysis],
     candidateCount: Int,
     rejectedForOverlap: Int,
-    rejectedForQuality: Int
+    rejectedForQuality: Int,
+    /** frames landing where a sun is already shown by the scenery */
+    rejectedForScenery: Int = 0
   ) {
     def keptCount: Int = kept.size
   }
@@ -58,15 +71,28 @@ object FrameSelector {
     frame.sun.map(_.semiDiameterDegrees * factor).getOrElse(0.266d * factor)
   }
 
+  /** Whether a frame would be drawn on a sun the scenery already shows.
+    *
+    * The very same rule as between two tiles, the sun standing in the scenery counting as one : it
+    * is drawn no differently, and it needs as much air around it as any other.
+    */
+  def clashesWithScenery(frame: FrameAnalysis, config: SelectionConfig): Boolean =
+    config.occupied.exists { spot =>
+      val required = (tileRadiusDegrees(frame, config) + spot.semiDiameterDegrees * config.tileRadiusFactor) * config.separationFactor
+      frame.position.exists(_.angularDistanceTo(spot.position) < required)
+    }
+
   def select(frames: Seq[FrameAnalysis], config: SelectionConfig = SelectionConfig()): Selection = {
-    val usable = frames
+    val measured = frames
       .filter(_.isUsable)
       .filter(_.disc.exists(_.detectionConfidence >= config.minimumConfidence))
       .sortBy(_.instant.map(_.toEpochMilli).getOrElse(0L))
       .toVector
 
-    val rejectedForQuality = frames.size - usable.size
-    if (usable.isEmpty) Selection(Nil, frames.size, 0, rejectedForQuality)
+    val usable             = measured.filterNot(clashesWithScenery(_, config))
+    val rejectedForScenery = measured.size - usable.size
+    val rejectedForQuality = frames.size - measured.size
+    if (usable.isEmpty) Selection(Nil, frames.size, 0, rejectedForQuality, rejectedForScenery)
     else {
       // The maximum of the eclipse is the anchor, not an afterthought : starting the walk there is
       // what puts it in the selection while the spacing rule keeps holding. Adding it afterwards
@@ -94,7 +120,8 @@ object FrameSelector {
         kept = kept.toList,
         candidateCount = frames.size,
         rejectedForOverlap = usable.size - kept.size,
-        rejectedForQuality = rejectedForQuality
+        rejectedForQuality = rejectedForQuality,
+        rejectedForScenery = rejectedForScenery
       )
     }
   }

@@ -200,6 +200,14 @@ et le sol doit commencer juste en dessous.
 | `--background-roll <°>` | roulis du boîtier, positif quand son horizon descend vers la droite |
 | `--background-sun <x,y>` | où est le soleil dessus, s'il ne se trouve pas tout seul |
 | `--background-scale <px/°>` | son échelle, si les EXIF ne donnent pas l'optique |
+| `--background-redraw` | redessine quand même une vignette sur son soleil |
+
+**Son soleil compte comme une vue.** La photo de paysage a été prise pendant la séance : son
+soleil *est* l'un des soleils de la séquence, à son instant et à sa place. Y poser une vignette
+le dessinerait deux fois, à quelques secondes d'intervalle et rendu autrement — précisément le
+chevauchement que toute la sélection existe pour éviter. La règle « aucun disque ne se touche »
+s'étend donc à lui : les vues qui tomberaient dessus ne sont pas dessinées, et le soleil du
+paysage ferme la séquence, au même écartement que les autres.
 
 Trois détails qui comptent :
 
