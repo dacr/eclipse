@@ -128,6 +128,44 @@ object Compositing {
       }
     }
 
+    /** Fills a disc with a solid color, its edge faded over the last fraction of the radius.
+      *
+      * Blending keeps the brighter of two pixels, which is exactly what makes the square edge of a
+      * tile vanish on a black sky - and exactly what makes a black subject vanish on anything else.
+      * A body which emits nothing has to be *put* black rather than left black, as soon as there is
+      * something behind it.
+      *
+      * @param featherRatio width of the fade at the edge, as a fraction of the radius
+      */
+    def fillDisc(centerX: Double, centerY: Double, radius: Double, color: Color, featherRatio: Double = 0.03d): Unit = {
+      val packed   = color.getRGB
+      val inner    = radius * (1d - math.max(0d, math.min(1d, featherRatio)))
+      val span     = math.max(1e-6d, radius - inner)
+      val firstX   = math.max(0, math.floor(centerX - radius).toInt)
+      val lastX    = math.min(width - 1, math.ceil(centerX + radius).toInt)
+      val firstY   = math.max(0, math.floor(centerY - radius).toInt)
+      val lastY    = math.min(height - 1, math.ceil(centerY + radius).toInt)
+      val rowWidth = lastX - firstX + 1
+      if (rowWidth > 0) {
+        val row = Array.ofDim[Int](rowWidth)
+        var y   = firstY
+        while (y <= lastY) {
+          image.getRGB(firstX, y, rowWidth, 1, row, 0, rowWidth)
+          var index = 0
+          while (index < rowWidth) {
+            val distance = math.hypot(firstX + index + 0.5d - centerX, y + 0.5d - centerY)
+            if (distance < radius) {
+              val alpha = if (distance <= inner) 1d else 1d - (distance - inner) / span
+              row(index) = blendPixel(packed, row(index), BlendMode.Over, alpha)
+            }
+            index += 1
+          }
+          image.setRGB(firstX, y, rowWidth, 1, row, 0, rowWidth)
+          y += 1
+        }
+      }
+    }
+
     /** Redraws a whole image over the canvas through a projective map.
       *
       * The map goes the other way round, from canvas pixel to source pixel : every canvas pixel asks

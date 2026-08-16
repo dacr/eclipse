@@ -102,6 +102,11 @@ object CompositeRenderer {
 
   private val timeFormat = DateTimeFormatter.ofPattern("HH:mm:ss")
 
+  /** How far short of the lunar edge the blackening stops, in radius units : the prominences stand
+    * right outside it and must not be touched
+    */
+  private val moonFeatherRatio = 0.03d
+
   /** The canvas the sequence needs, grown towards the background when there is one.
     *
     * A background is a whole landscape, far wider than the strip of sky the sequence crosses : the
@@ -250,6 +255,13 @@ object CompositeRenderer {
           if (merged.isDefined) stacked += 1
           val ready  = merged.getOrElse(adjust(tile.image, placement.discRadiusPixels, frame.phase, config))
           val mask   = maskFor(masks, ready.getWidth, placement.discRadiusPixels, frame.phase, config)
+          // The moon emits nothing, and at totality nothing stands in front of it either : the sky
+          // it hides is behind it. Blending keeps the brighter of the two though, so on anything but
+          // a black canvas - a landscape drawn underneath - the scenery would shine straight through
+          // the moon. It is therefore put black before the corona is laid over it, exactly where the
+          // merged tile blackens it, so the prominences standing just outside the edge are untouched.
+          if (frame.phase == FramePhase.Totality)
+            canvas.fillDisc(placement.x, placement.y, placement.discRadiusPixels, Color.BLACK, moonFeatherRatio)
           canvas.drawCenteredOn(ready, placement.x, placement.y, config.blendMode, Some(mask))
           if (config.annotateTimes) annotateTime(canvas, placement, config)
           ()
@@ -360,7 +372,7 @@ object CompositeRenderer {
     * or another : the moon emits nothing. The fade stops just short of the edge so that the
     * prominences, which stand right outside it, are left untouched.
     */
-  private def blackenMoon(tile: RgbRaster, moonRadius: Double, feather: Double = 0.03d): RgbRaster = {
+  private def blackenMoon(tile: RgbRaster, moonRadius: Double, feather: Double = moonFeatherRatio): RgbRaster = {
     val centerX = tile.width / 2d
     val centerY = tile.height / 2d
     val inner   = moonRadius * (1d - feather)
