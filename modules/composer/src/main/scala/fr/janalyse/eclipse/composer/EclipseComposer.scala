@@ -43,7 +43,14 @@ object EclipseComposer {
       if (placements.isEmpty) Left("the layout could not place any frame")
       else
         CompositeRenderer
-          .render(placements, config.render, config.cacheDirectory, config.rawDecode, onProgress)
+          .render(
+            placements,
+            config.render,
+            config.cacheDirectory,
+            config.rawDecode,
+            onProgress,
+            config.layout.skyFrame(selection.kept)
+          )
           .map(result => ComposeOutcome(result, selection, placements))
     }
   }

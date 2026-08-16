@@ -17,6 +17,12 @@ COMPOSITE    ?= $(OUT)/composite.png
 SBT          ?= sbt
 ARGS         ?=
 
+# photo grand angle du même ciel, prise du même endroit : elle sert de décor et
+# se place toute seule, par son propre soleil
+# exemple : make compose-landscape BACKGROUND=IMG_3794.JPG
+BACKGROUND ?=
+BACKGROUND_OPTION := $(if $(BACKGROUND),--background $(BACKGROUND),)
+
 # position de l'observateur, utile seulement si les EXIF ne portent pas de GPS
 # exemple : make analyze OBSERVER=43.6047,1.4442,150
 OBSERVER ?=
@@ -36,6 +42,7 @@ help: ## affiche cette aide
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "variables : PHOTOS=$(PHOTOS) OUT=$(OUT) CACHE=$(CACHE) OBSERVER=$(OBSERVER)"
+	@echo "            BACKGROUND=$(BACKGROUND) pour poser la séquence dans son paysage"
 	@echo "            ARGS=\"...\" pour passer n'importe quelle option à la commande"
 
 .PHONY: check
@@ -87,6 +94,12 @@ compose-timeline: ## bande chronologique rectiligne, l'évolution seule
 compose-grid: ## planche contact
 	@mkdir -p $(OUT)
 	$(SBT) -batch "cli/run compose $(MEASUREMENTS) --cache $(CACHE) --layout grid --out $(OUT)/composite-grid.png $(ARGS)"
+
+.PHONY: compose-landscape
+compose-landscape: ## la séquence posée dans son paysage (BACKGROUND=photo grand angle)
+	@test -n "$(BACKGROUND)" || { echo "donner BACKGROUND=<photo grand angle du même ciel>"; exit 1; }
+	@mkdir -p $(OUT)
+	$(SBT) -batch "cli/run compose $(MEASUREMENTS) --cache $(CACHE) $(BACKGROUND_OPTION) --out $(OUT)/composite-landscape.png $(ARGS)"
 
 .PHONY: compose-annotated
 compose-annotated: ## composite avec l'heure sous chaque vue

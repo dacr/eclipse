@@ -55,6 +55,16 @@ object Main {
       |  --no-color-fix            keeps the original color cast of the filter
       |  --no-brightness-fix       keeps the original brightness of each frame
       |  --quality <0..1>          jpeg compression level when the output is a jpeg
+      |
+      |background options :
+      |  a wide angle shot of the same sky, from the same place, drawn behind the sequence and
+      |  placed by its own sun - the landscape the long lens could not hold
+      |  --background <file>       the wide angle frame to use as scenery
+      |  --background-margin <deg> sky kept around the sequence to show it (default : 4°)
+      |  --background-brightness <0..1>  dims it, so that the suns stay the subject
+      |  --background-roll <deg>   camera roll, positive when its horizon runs down to the right
+      |  --background-sun <x,y>    where the sun is on it, when it cannot be found by itself
+      |  --background-scale <px/°> its plate scale, when its metadata does not give the optics
       |""".stripMargin
 
   def main(args: Array[String]): Unit = {
@@ -174,9 +184,10 @@ object Main {
 
   private def plan(options: Options): Either[String, String] = {
     for {
-      frames <- loadFrames(options)
-      tuned   = tuning(options, frames)
-      config  = composeConfig(options, tuned)
+      frames     <- loadFrames(options)
+      background <- backgroundOf(options, frames)
+      tuned       = tuning(options, frames, background)
+      config      = composeConfig(options, tuned, background.map(_.background))
     } yield {
       val selection       = FrameSelector.select(frames, config.selection)
       val pixelsPerDegree = EclipseComposer.pixelsPerDegree(frames, config)
@@ -184,8 +195,13 @@ object Main {
         selection.kept,
         LayoutConfig(pixelsPerDegree, config.render.tileRadiusFactor, config.render.totalityTileRadiusFactor)
       )
-      val width           = if (placements.isEmpty) 0d else placements.map(p => p.x + p.tileRadiusPixels).max - placements.map(p => p.x - p.tileRadiusPixels).min
-      val height          = if (placements.isEmpty) 0d else placements.map(p => p.y + p.tileRadiusPixels).max - placements.map(p => p.y - p.tileRadiusPixels).min
+      // the very same reckoning the renderer does, background included : what is announced here is
+      // what will come out
+      val canvas          = Option.when(placements.nonEmpty)(
+        CompositeRenderer.canvasPlan(placements, config.render, config.layout.skyFrame(selection.kept))
+      )
+      val width           = canvas.map(_.width(0)).getOrElse(0d)
+      val height          = canvas.map(_.height(0)).getOrElse(0d)
       val gaps            = placements
         .sliding(2)
         .collect { case Seq(first, second) =>
@@ -222,22 +238,26 @@ object Main {
         f"composite size        : ${width + 2 * config.render.marginPixels}%.0f x ${height + 2 * config.render.marginPixels}%.0f px",
         f"field covered         : ${width / pixelsPerDegree}%.2f° x ${height / pixelsPerDegree}%.2f°",
         gaps.minOption.map(value => f"smallest gap          : $value%.0f px ${if (value < 0) "(OVERLAP)" else ""}").getOrElse(""),
-        cadence.minOption.map(value => s"kept frames every     : ${value}s to ${cadence.max}s").getOrElse("")
+        cadence.minOption.map(value => s"kept frames every     : ${value}s to ${cadence.max}s").getOrElse(""),
+        background.map(_.report.map(line => s"background            : $line").mkString("\n")).getOrElse(""),
+        canvas.toList.flatMap(_.notes).map(note => s"note                  : $note").mkString("\n")
       ).filter(_.nonEmpty).mkString("\n")
     }
   }
 
   private def compose(options: Options): Either[String, String] = {
     for {
-      frames  <- loadFrames(options)
-      tuned    = tuning(options, frames)
-      config   = composeConfig(options, tuned)
-      _        = tuned.explanations.foreach(explanation => Console.err.println(s"automatic : $explanation"))
-      outcome <- EclipseComposer.compose(
-                   frames,
-                   config,
-                   (done, total) => Console.err.println(f"[$done%4d/$total%4d] drawing")
-                 )
+      frames     <- loadFrames(options)
+      background <- backgroundOf(options, frames)
+      _           = background.foreach(_.report.foreach(line => Console.err.println(s"background : $line")))
+      tuned       = tuning(options, frames, background)
+      config      = composeConfig(options, tuned, background.map(_.background))
+      _           = tuned.explanations.foreach(explanation => Console.err.println(s"automatic : $explanation"))
+      outcome    <- EclipseComposer.compose(
+                      frames,
+                      config,
+                      (done, total) => Console.err.println(f"[$done%4d/$total%4d] drawing")
+                    )
     } yield {
       val output = options.path("out").getOrElse(Paths.get("composite.png"))
       Option(output.getParent).foreach(Files.createDirectories(_))
@@ -267,22 +287,58 @@ object Main {
         f"${disc.phase} r=${disc.radiusPixels}%.1fpx obscuration=${disc.obscuration.getOrElse(0d) * 100}%.1f%% confidence=${disc.detectionConfidence}%.2f"
     }
 
+  private def cacheDirectory(options: Options): Path = options.path("cache").getOrElse(Paths.get(".eclipse-cache"))
+
+  private def atmosphere(options: Options): AtmosphericConditions =
+    AtmosphericConditions(
+      pressureHectoPascals = options.double("pressure").getOrElse(1010d),
+      temperatureCelsius = options.double("temperature").getOrElse(15d)
+    )
+
   private def analysisConfig(options: Options): FrameAnalysisConfig =
     FrameAnalysisConfig(
-      cacheDirectory = options.path("cache").getOrElse(Paths.get(".eclipse-cache")),
+      cacheDirectory = cacheDirectory(options),
       rawDecode = RawDecoder.RawDecodeConfig(),
       detector = DiscDetector.DiscDetectorConfig(),
-      atmosphere = AtmosphericConditions(
-        pressureHectoPascals = options.double("pressure").getOrElse(1010d),
-        temperatureCelsius = options.double("temperature").getOrElse(15d)
-      ),
+      atmosphere = atmosphere(options),
       observer = options.observer,
       preferRawPixels = !options.flag("prefer-jpeg"),
       parallelism = options.int("parallelism").getOrElse(2)
     )
 
+  private def backgroundMarginDegrees(options: Options): Double = options.double("background-margin").getOrElse(4d)
+
+  /** Reads the wide angle frame given as scenery, and works out where it was aimed.
+    *
+    * The session it belongs to hands it what its own metadata does not carry : where the camera
+    * stood - a second body rarely has a GPS fix, and it did not move anyway - and when the session
+    * happened, which is what a clock left on the wrong time zone is put right against.
+    */
+  private def backgroundOf(options: Options, frames: Seq[FrameAnalysis]): Either[String, Option[SkyBackground.Loaded]] =
+    options.path("background") match {
+      case None       => Right(None)
+      case Some(path) =>
+        val (sessionObserver, sessionSpan) = SkyBackground.sessionContext(frames)
+        SkyBackground
+          .load(
+            SkyBackground.Request(
+              path = path,
+              cacheDirectory = cacheDirectory(options),
+              observer = options.observer.orElse(sessionObserver),
+              atmosphere = atmosphere(options),
+              sessionSpan = sessionSpan,
+              rollDegrees = options.double("background-roll").getOrElse(0d),
+              brightness = options.double("background-brightness").getOrElse(1d),
+              sunPixel = options.pair("background-sun"),
+              pixelsPerDegree = options.double("background-scale"),
+              preferRawPixels = !options.flag("prefer-jpeg")
+            )
+          )
+          .map(Some(_))
+    }
+
   /** Everything is measured on the frames, then whatever was asked for explicitly takes over */
-  private def tuning(options: Options, frames: Seq[FrameAnalysis]): AutoTuner.Tuning =
+  private def tuning(options: Options, frames: Seq[FrameAnalysis], background: Option[SkyBackground.Loaded]): AutoTuner.Tuning =
     if (options.flag("no-auto"))
       AutoTuner.Tuning(SelectionConfig(), SkyPathLayout(), RenderConfig(), None, List("automatic tuning disabled"))
     else
@@ -293,13 +349,14 @@ object Main {
           maximumCanvasSide = options.int("max-side").getOrElse(24000),
           separationFactor = options.double("separation").getOrElse(1.05d),
           balanced = options.flag("balanced") || options.int("frames-per-side").isDefined,
-          framesPerSide = options.int("frames-per-side")
+          framesPerSide = options.int("frames-per-side"),
+          extraFieldDegrees = if (background.isDefined) backgroundMarginDegrees(options) else 0d
         )
       )
 
-  private def composeConfig(options: Options, tuned: AutoTuner.Tuning): ComposeConfig =
+  private def composeConfig(options: Options, tuned: AutoTuner.Tuning, background: Option[SkyBackground]): ComposeConfig =
     ComposeConfig(
-      cacheDirectory = options.path("cache").getOrElse(Paths.get(".eclipse-cache")),
+      cacheDirectory = cacheDirectory(options),
       selection = SelectionConfig(
         separationFactor = options.double("separation").getOrElse(tuned.selection.separationFactor),
         tileRadiusFactor = options.double("tile-factor").getOrElse(tuned.selection.tileRadiusFactor),
@@ -331,7 +388,9 @@ object Main {
         normalizeBrightness = !options.flag("no-brightness-fix"),
         annotateTimes = options.flag("annotate"),
         caption = options.value("caption"),
-        captionZoneId = ZoneOffset.UTC
+        captionZoneId = ZoneOffset.UTC,
+        background = background,
+        backgroundMarginDegrees = backgroundMarginDegrees(options)
       )
     )
 
@@ -409,6 +468,19 @@ object Main {
     def path(name: String): Option[Path]     = values.get(name).map(Paths.get(_))
     def flag(name: String): Boolean          = flags.contains(name)
 
+    /** A pair of numbers given as `x,y` */
+    def pair(name: String): Option[(Double, Double)] =
+      values.get(name).flatMap { text =>
+        text.split(",").map(_.trim).toList match {
+          case first :: second :: _ =>
+            for {
+              parsedFirst  <- Try(first.toDouble).toOption
+              parsedSecond <- Try(second.toDouble).toOption
+            } yield (parsedFirst, parsedSecond)
+          case _                    => None
+        }
+      }
+
     def observer: Option[GeoPoint] =
       values.get("observer").flatMap { text =>
         text.split(",").map(_.trim).toList match {
@@ -427,7 +499,9 @@ object Main {
       "out", "cache", "observer", "parallelism", "pressure", "temperature",
       "layout", "disc-radius", "separation", "tile-factor", "totality-factor",
       "blend", "columns", "caption", "quality", "max-pixels", "max-side", "margin", "min-confidence",
-      "frames-per-side", "inspect-size"
+      "frames-per-side", "inspect-size",
+      "background", "background-margin", "background-brightness", "background-roll",
+      "background-sun", "background-scale"
     )
 
     def parse(arguments: List[String]): Options = {

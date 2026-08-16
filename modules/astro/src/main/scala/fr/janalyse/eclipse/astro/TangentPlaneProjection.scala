@@ -15,43 +15,18 @@ import fr.janalyse.eclipse.model.HorizontalCoordinates
   * @param center direction the virtual camera is pointed at, and tangency point of the projection
   */
 final case class TangentPlaneProjection(center: HorizontalCoordinates) {
-  private val centerAltitude = math.toRadians(center.altitudeDegrees)
-  private val centerAzimuth  = math.toRadians(center.azimuthDegrees)
+
+  /** The projection is the geometry of a camera pointed at the center, level and unrolled */
+  val frame: SkyFrame = SkyFrame(center)
 
   /** Projects a direction of the sky, `x` grows towards increasing azimuths (to the right when
     * facing the center) and `y` grows upwards. Returns `None` for anything more than 90° away.
     */
-  def project(coordinates: HorizontalCoordinates): Option[(Double, Double)] = {
-    val altitude     = math.toRadians(coordinates.altitudeDegrees)
-    val deltaAzimuth = math.toRadians(coordinates.azimuthDegrees) - centerAzimuth
-    val cosDistance  =
-      math.sin(centerAltitude) * math.sin(altitude) +
-        math.cos(centerAltitude) * math.cos(altitude) * math.cos(deltaAzimuth)
-    if (cosDistance <= 1e-6d) None
-    else {
-      val x = math.cos(altitude) * math.sin(deltaAzimuth) / cosDistance
-      val y = (math.cos(centerAltitude) * math.sin(altitude) -
-        math.sin(centerAltitude) * math.cos(altitude) * math.cos(deltaAzimuth)) / cosDistance
-      Some((x, y))
-    }
-  }
+  def project(coordinates: HorizontalCoordinates): Option[(Double, Double)] = frame.project(coordinates)
 
   /** Inverse projection, mostly useful for tests and for annotating a composite */
-  def unproject(x: Double, y: Double): HorizontalCoordinates = {
-    val distance = math.sqrt(x * x + y * y)
-    if (distance < 1e-12d) center
-    else {
-      val angle    = math.atan(distance)
-      val altitude = math.asin(
-        math.cos(angle) * math.sin(centerAltitude) + y * math.sin(angle) * math.cos(centerAltitude) / distance
-      )
-      val azimuth  = centerAzimuth + math.atan2(
-        x * math.sin(angle),
-        distance * math.cos(centerAltitude) * math.cos(angle) - y * math.sin(centerAltitude) * math.sin(angle)
-      )
-      HorizontalCoordinates(SolarEphemeris.normalizeDegrees(math.toDegrees(azimuth)), math.toDegrees(altitude))
-    }
-  }
+  def unproject(x: Double, y: Double): HorizontalCoordinates =
+    if (x * x + y * y < 1e-24d) center else frame.skyAt(x, y)
 
   /** Angular size, in tangent units, of something seen `degrees` wide at the given position : away
     * from the tangency point the gnomonic projection stretches the field, this accounts for it.

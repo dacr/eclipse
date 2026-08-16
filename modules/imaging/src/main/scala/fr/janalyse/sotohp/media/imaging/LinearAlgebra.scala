@@ -73,6 +73,40 @@ object LinearAlgebra {
     }
   }
 
+  /** Product of two 3x3 row major matrices, `left` applied after `right` */
+  def multiply3x3(left: Array[Double], right: Array[Double]): Array[Double] = {
+    val result = Array.ofDim[Double](9)
+    var row    = 0
+    while (row < 3) {
+      var column = 0
+      while (column < 3) {
+        var accumulator = 0d
+        var index       = 0
+        while (index < 3) { accumulator += left(row * 3 + index) * right(index * 3 + column); index += 1 }
+        result(row * 3 + column) = accumulator
+        column += 1
+      }
+      row += 1
+    }
+    result
+  }
+
+  /** Affine transform written as a 3x3 matrix : scale then translation, per axis */
+  def affine3x3(scaleX: Double, scaleY: Double, offsetX: Double, offsetY: Double): Array[Double] =
+    Array(scaleX, 0d, offsetX, 0d, scaleY, offsetY, 0d, 0d, 1d)
+
+  /** Applies a 3x3 projective map to a point.
+    *
+    * `None` when the third coordinate is not positive : the point is then at infinity, or behind the
+    * plane the map projects onto - which is the very same thing as a camera not seeing what is
+    * behind it.
+    */
+  def applyProjective(matrix: Array[Double], x: Double, y: Double): Option[(Double, Double)] = {
+    val depth = matrix(6) * x + matrix(7) * y + matrix(8)
+    if (depth <= 1e-12d) None
+    else Some(((matrix(0) * x + matrix(1) * y + matrix(2)) / depth, (matrix(3) * x + matrix(4) * y + matrix(5)) / depth))
+  }
+
   /** Evaluates a polynomial given its coefficients, constant term first */
   def evaluatePolynomial(coefficients: Array[Double], x: Double): Double = {
     var result = 0d

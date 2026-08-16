@@ -30,7 +30,11 @@ object AutoTuner {
       * kept, and the composite comes out smaller than it could have been
       */
     balanced: Boolean = false,
-    framesPerSide: Option[Int] = None
+    framesPerSide: Option[Int] = None,
+    /** sky kept around the sequence beyond the frames themselves, to show a background : the scale
+      * has to be chosen for the canvas which will actually be drawn, not for the sequence alone
+      */
+    extraFieldDegrees: Double = 0d
   )
 
   final case class Tuning(
@@ -112,8 +116,10 @@ object AutoTuner {
       // the layout is run once at one pixel per degree : the result is the extent of the composite
       // expressed in degrees, from which the largest usable scale is derived
       val probe      = layout.place(selected.kept, LayoutConfig(1d, tileRadiusFactor, totalityTileRadiusFactor))
-      val spanWidth  = math.max(1e-6d, probe.map(p => p.x + p.tileRadiusPixels).max - probe.map(p => p.x - p.tileRadiusPixels).min)
-      val spanHeight = math.max(1e-6d, probe.map(p => p.y + p.tileRadiusPixels).max - probe.map(p => p.y - p.tileRadiusPixels).min)
+      val extra      = math.max(0d, intent.extraFieldDegrees) * 2d
+      val spanWidth  = math.max(1e-6d, probe.map(p => p.x + p.tileRadiusPixels).max - probe.map(p => p.x - p.tileRadiusPixels).min) + extra
+      val spanHeight = math.max(1e-6d, probe.map(p => p.y + p.tileRadiusPixels).max - probe.map(p => p.y - p.tileRadiusPixels).min) + extra
+      if (extra > 0d) explanations += f"${extra}%.1f° of sky added around the sequence to make room for the background"
 
       val nativeScale  = plateScale.map(_.pixelsPerDegree).getOrElse(800d)
       val sideLimit    = intent.maximumCanvasSide / math.max(spanWidth, spanHeight)

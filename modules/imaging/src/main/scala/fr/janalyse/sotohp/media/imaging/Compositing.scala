@@ -128,6 +128,49 @@ object Compositing {
       }
     }
 
+    /** Redraws a whole image over the canvas through a projective map.
+      *
+      * The map goes the other way round, from canvas pixel to source pixel : every canvas pixel asks
+      * where it comes from and helps itself, which is what leaves no hole whatever the map does to
+      * the geometry. Canvas pixels whose source falls outside the image are left as they are.
+      *
+      * A projective map is exactly what relates two rectilinear views of the same distant scene, so
+      * this is all that is needed to redraw a wide angle photograph in the geometry of another one -
+      * with no trigonometry in the loop, nine multiplications per pixel.
+      *
+      * @param matrix 3x3 row major, taking canvas coordinates into source coordinates
+      * @param brightness applied to the source pixels on the way, to push a background back
+      */
+    def paintProjective(source: BufferedImage, matrix: Array[Double], brightness: Double = 1d): Unit = {
+      val sourceWidth  = source.getWidth
+      val sourceHeight = source.getHeight
+      val pixels       = Array.ofDim[Int](sourceWidth * sourceHeight)
+      source.getRGB(0, 0, sourceWidth, sourceHeight, pixels, 0, sourceWidth)
+
+      java.util.stream.IntStream
+        .range(0, height)
+        .parallel()
+        .forEach { y =>
+          val row     = Array.ofDim[Int](width)
+          var changed = false
+          image.getRGB(0, y, width, 1, row, 0, width)
+          var x = 0
+          while (x < width) {
+            val depth = matrix(6) * x + matrix(7) * y + matrix(8)
+            if (depth > 1e-12d) {
+              val sourceX = (matrix(0) * x + matrix(1) * y + matrix(2)) / depth
+              val sourceY = (matrix(3) * x + matrix(4) * y + matrix(5)) / depth
+              if (sourceX >= 0d && sourceY >= 0d && sourceX <= sourceWidth - 1d && sourceY <= sourceHeight - 1d) {
+                row(x) = sampleBilinear(pixels, sourceWidth, sourceX, sourceY, brightness)
+                changed = true
+              }
+            }
+            x += 1
+          }
+          if (changed) image.setRGB(0, y, width, 1, row, 0, width)
+        }
+    }
+
     /** Blends a tile so that its center lands on the given position */
     def drawCenteredOn(
       tile: BufferedImage,
@@ -157,6 +200,29 @@ object Compositing {
       } finally graphics.dispose()
       Canvas(image)
     }
+  }
+
+  /** Bilinear sample of a packed RGB image, the four neighbours weighted by the distance to each */
+  private def sampleBilinear(pixels: Array[Int], width: Int, x: Double, y: Double, brightness: Double): Int = {
+    val leftColumn = x.toInt
+    val topRow     = y.toInt
+    val rightColumn = math.min(leftColumn + 1, width - 1)
+    val bottomRow   = math.min(topRow + 1, pixels.length / width - 1)
+    val fractionX   = x - leftColumn
+    val fractionY   = y - topRow
+    val topLeft     = pixels(topRow * width + leftColumn)
+    val topRight    = pixels(topRow * width + rightColumn)
+    val bottomLeft  = pixels(bottomRow * width + leftColumn)
+    val bottomRight = pixels(bottomRow * width + rightColumn)
+
+    def channel(shift: Int): Int = {
+      val top    = ((topLeft >> shift) & 0xff) * (1d - fractionX) + ((topRight >> shift) & 0xff) * fractionX
+      val bottom = ((bottomLeft >> shift) & 0xff) * (1d - fractionX) + ((bottomRight >> shift) & 0xff) * fractionX
+      val value  = (top * (1d - fractionY) + bottom * fractionY) * brightness
+      math.max(0, math.min(255, math.round(value).toInt))
+    }
+
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
   }
 
   private def blendPixel(source: Int, target: Int, mode: BlendMode, alpha: Double): Int = {

@@ -1,10 +1,11 @@
 package fr.janalyse.eclipse.composer
 
+import fr.janalyse.eclipse.astro.SkyFrame
 import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase, PlateScale}
 import fr.janalyse.sotohp.media.imaging.CircleFitting.Circle
 import fr.janalyse.sotohp.media.imaging.Compositing.{BlendMode, Canvas}
 import fr.janalyse.sotohp.media.imaging.Rasters.RgbRaster
-import fr.janalyse.sotohp.media.imaging.{ColorBalance, Compositing, DiscMeasures, ExposureStack, RawDecoder, ToneMapping}
+import fr.janalyse.sotohp.media.imaging.{ColorBalance, Compositing, DiscMeasures, ExposureStack, LinearAlgebra, RawDecoder, ToneMapping}
 
 import java.awt.image.BufferedImage
 import java.awt.{Color, Font, RenderingHints}
@@ -22,7 +23,7 @@ final case class RenderConfig(
   blendMode: BlendMode = BlendMode.Lighten,
   /** width of the fade at the tile edge, in tile radius units */
   featherRatio: Double = 0.25d,
-  background: Color = Color.BLACK,
+  backgroundColor: Color = Color.BLACK,
   marginPixels: Int = 80,
   /** merges the whole bracket of a totality burst into one tile, rather than choosing one of them */
   stackTotality: Boolean = true,
@@ -41,6 +42,13 @@ final case class RenderConfig(
   annotateTimes: Boolean = false,
   caption: Option[String] = None,
   captionZoneId: ZoneOffset = ZoneOffset.UTC,
+  /** wide angle frame drawn behind the sequence, placed by its own sun */
+  background: Option[SkyBackground] = None,
+  /** how far around the sequence the canvas may grow to show that background, in degrees of sky :
+    * the frames alone stop at the last sun, and the landscape that gives them a place to be is
+    * just below it
+    */
+  backgroundMarginDegrees: Double = 4d,
   /** safety net, a composite bigger than that gets scaled down */
   maximumCanvasPixels: Long = 250000000L
 )
@@ -71,29 +79,106 @@ final case class CompositeResult(
   placements: Vector[Placement]
 )
 
+/** How far the canvas has to reach, in the coordinates the layout placed the frames in.
+  *
+  * Worked out before anything is drawn, so that the size of the output can be told - and judged -
+  * without spending an hour decoding RAW files for it.
+  */
+final case class CanvasPlan(
+  minimumX: Double,
+  minimumY: Double,
+  maximumX: Double,
+  maximumY: Double,
+  pixelsPerDegree: Double,
+  background: Option[SkyBackground],
+  notes: List[String]
+) {
+  def width(marginPixels: Int): Double  = maximumX - minimumX + 2 * marginPixels
+  def height(marginPixels: Int): Double = maximumY - minimumY + 2 * marginPixels
+}
+
 /** Draws the composite : one tile per selected frame, blended at its own place */
 object CompositeRenderer {
 
   private val timeFormat = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+  /** The canvas the sequence needs, grown towards the background when there is one.
+    *
+    * A background is a whole landscape, far wider than the strip of sky the sequence crosses : the
+    * canvas grows towards it, but only as far as asked for, and never further than the picture
+    * actually reaches. The sequence has the last word though - a sun is never dropped because the
+    * scenery stopped short of it, it is the scenery which is then left with a black corner.
+    */
+  def canvasPlan(placements: Seq[Placement], config: RenderConfig, projection: Option[SkyFrame]): CanvasPlan = {
+    val sequenceMinimumX = placements.map(placement => placement.x - placement.tileRadiusPixels).min
+    val sequenceMaximumX = placements.map(placement => placement.x + placement.tileRadiusPixels).max
+    val sequenceMinimumY = placements.map(placement => placement.y - placement.tileRadiusPixels).min
+    val sequenceMaximumY = placements.map(placement => placement.y + placement.tileRadiusPixels).max
+
+    // the layout works in tangent plane pixels : the very scale the discs were sized at
+    val pixelsPerDegree = placements
+      .flatMap(placement => placement.frame.sun.map(sun => placement.discRadiusPixels / sun.semiDiameterDegrees))
+      .headOption
+      .getOrElse(config.discRadiusPixels / 0.266d)
+    val pixelsPerRadian = pixelsPerDegree * 180d / math.Pi
+    val notes           = List.newBuilder[String]
+
+    val backdrop = (config.background, projection) match {
+      case (Some(background), Some(frame)) =>
+        val margin  = config.backgroundMarginDegrees * pixelsPerDegree
+        val covered = background.coveredArea(frame, pixelsPerRadian)
+        if (covered.isEmpty) notes += "the background was dropped : it does not cover the sky the sequence crosses"
+        covered.map { case (left, top, right, bottom) =>
+          val uncovered = (top - sequenceMinimumY) / pixelsPerDegree
+          if (uncovered > 0.2d)
+            notes += f"the sequence reaches ${uncovered}%.1f° above what the background covers, that much of the sky stays black"
+          (
+            background,
+            math.max(left, sequenceMinimumX - margin),
+            math.max(top, sequenceMinimumY - margin),
+            math.min(right, sequenceMaximumX + margin),
+            math.min(bottom, sequenceMaximumY + margin)
+          )
+        }
+      case (Some(_), None)                 =>
+        notes += "the background was dropped : it can only be placed on a layout which follows the real sky"
+        None
+      case _                               => None
+    }
+
+    CanvasPlan(
+      minimumX = backdrop.map(found => math.min(sequenceMinimumX, found._2)).getOrElse(sequenceMinimumX),
+      minimumY = backdrop.map(found => math.min(sequenceMinimumY, found._3)).getOrElse(sequenceMinimumY),
+      maximumX = backdrop.map(found => math.max(sequenceMaximumX, found._4)).getOrElse(sequenceMaximumX),
+      maximumY = backdrop.map(found => math.max(sequenceMaximumY, found._5)).getOrElse(sequenceMaximumY),
+      pixelsPerDegree = pixelsPerDegree,
+      background = backdrop.map(_._1),
+      notes = notes.result()
+    )
+  }
 
   def render(
     placements: Seq[Placement],
     config: RenderConfig = RenderConfig(),
     cacheDirectory: Path,
     rawDecode: RawDecoder.RawDecodeConfig = RawDecoder.RawDecodeConfig(),
-    onProgress: (Int, Int) => Unit = (_, _) => ()
+    onProgress: (Int, Int) => Unit = (_, _) => (),
+    /** the sky geometry the placements were laid out with, needed to place a background in it */
+    projection: Option[SkyFrame] = None
   ): Either[String, CompositeResult] = {
     if (placements.isEmpty) Left("nothing to draw")
     else {
       val warnings = List.newBuilder[String]
 
       // --- canvas geometry --------------------------------------------------------------------
-      val minimumX = placements.map(placement => placement.x - placement.tileRadiusPixels).min
-      val maximumX = placements.map(placement => placement.x + placement.tileRadiusPixels).max
-      val minimumY = placements.map(placement => placement.y - placement.tileRadiusPixels).min
-      val maximumY = placements.map(placement => placement.y + placement.tileRadiusPixels).max
-      val rawWidth  = maximumX - minimumX + 2 * config.marginPixels
-      val rawHeight = maximumY - minimumY + 2 * config.marginPixels
+      val plan = canvasPlan(placements, config, projection)
+      plan.notes.foreach(warnings += _)
+
+      val minimumX = plan.minimumX
+      val minimumY = plan.minimumY
+      val pixelsPerRadian = plan.pixelsPerDegree * 180d / math.Pi
+      val rawWidth  = plan.width(config.marginPixels)
+      val rawHeight = plan.height(config.marginPixels)
 
       val reduction = {
         val pixels = rawWidth * rawHeight
@@ -116,8 +201,30 @@ object CompositeRenderer {
 
       val width  = math.max(1, math.ceil(rawWidth * reduction).toInt)
       val height = math.max(1, math.ceil(rawHeight * reduction).toInt)
-      val canvas = Canvas.create(width, height, config.background)
+      val canvas = Canvas.create(width, height, config.backgroundColor)
       val masks  = mutable.Map.empty[(Int, Int, Int), Array[Float]]
+
+      // --- the scenery, drawn first and blended over ----------------------------------------
+      for {
+        frame      <- projection
+        background <- plan.background
+      } {
+        // canvas pixels back to the tangent plane of the composite : the very transform the
+        // placements went through, read backwards
+        val canvasToTangentPlane = LinearAlgebra.affine3x3(
+          scaleX = 1d / (reduction * pixelsPerRadian),
+          scaleY = -1d / (reduction * pixelsPerRadian),
+          offsetX = (minimumX - config.marginPixels) / pixelsPerRadian,
+          offsetY = (config.marginPixels - minimumY) / pixelsPerRadian
+        )
+        canvas.paintProjective(
+          background.image,
+          background.canvasMatrix(frame, canvasToTangentPlane),
+          background.brightness
+        )
+        val drawnScale = plan.pixelsPerDegree * reduction
+        warnings += f"background drawn at ${drawnScale / background.pixelsPerDegree}%.1fx its own resolution, ${background.pixelsPerDegree}%.0f px/° against ${drawnScale}%.0f px/° for the composite"
+      }
 
       // --- tiles ------------------------------------------------------------------------------
       var drawn = 0

@@ -6,6 +6,49 @@ import fr.janalyse.sotohp.media.imaging.Rasters.{GrayRaster, RgbRaster}
 /** Measurements taken inside a detected disc */
 object DiscMeasures {
 
+  /** The brightest thing in a picture, as a rectangle and a center */
+  final case class BrightSpot(minimumX: Int, minimumY: Int, maximumX: Int, maximumY: Int, area: Int) {
+    def width: Int  = maximumX - minimumX + 1
+    def height: Int = maximumY - minimumY + 1
+
+    /** Middle of the bounding box, and not the center of gravity.
+      *
+      * On a partially eclipsed sun the two are not the same : the moon eats one side of the disc, so
+      * the lit pixels weigh more on the other one and their center of gravity slides away from the
+      * center of the sun by a good fraction of a radius. The extreme lit points, on the other hand,
+      * still sit on the solar limb itself as long as the bite does not reach them, so the middle of
+      * the bounding box stays put.
+      */
+    def centerX: Double = (minimumX + maximumX) / 2d
+    def centerY: Double = (minimumY + maximumY) / 2d
+
+    def radiusPixels: Double = (width + height) / 4d
+    def circle: Circle       = Circle(centerX, centerY, radiusPixels)
+  }
+
+  /** Locates the brightest compact thing of a picture : where the sun is in a landscape.
+    *
+    * Nothing here fits anything - this is not a substitute for [[DiscDetector]], which measures a
+    * solar disc filling a good part of a frame. It answers a much cruder question, the one a wide
+    * angle shot of a sunset asks : the sun is forty pixels across among twenty four million, it is
+    * the only thing in the frame anywhere near the maximum, where is it ?
+    *
+    * @param levelRatio how close to the brightest pixel of the picture a pixel has to be to count.
+    * @param minimumArea below that many pixels the spot is taken to be noise rather than a subject.
+    */
+  def brightestSpot(raster: GrayRaster, levelRatio: Double = 0.9d, minimumArea: Int = 4): Option[BrightSpot] = {
+    val maximum = raster.maximum
+    if (maximum <= 0f) None
+    else
+      raster
+        .brighterThan(maximum * levelRatio)
+        .largestGroup
+        .filter(_.count >= minimumArea)
+        .flatMap(group => group.bounds.map { case (minimumX, minimumY, maximumX, maximumY) =>
+          BrightSpot(minimumX, minimumY, maximumX, maximumY, group.count)
+        })
+  }
+
   /** Fraction of the disc area which is dark.
     *
     * On an eclipse frame this is the obscuration : the part of the solar disc hidden by the moon.

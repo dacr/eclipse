@@ -60,6 +60,18 @@ object Shot {
   /** A shot made of a single file, for the times when there is nothing to group */
   def of(path: Path): Shot = Shot(keyOf(path), baseNameOf(path), List(path))
 
+  /** The whole shot a single file belongs to, its siblings looked up beside it.
+    *
+    * Naming one half of a RAW+JPEG pair is meant to bring the other half along : whichever of
+    * `IMG_1234.CR3` and `IMG_1234.JPG` is given, the pixels come from the RAW and the metadata from
+    * both. Falls back to the file alone when the directory cannot be read.
+    */
+  def around(path: Path): Shot = {
+    val siblings = Option(path.getParent).map(_.toFile).flatMap(directory => Option(directory.listFiles())).toList.flatten
+    val same     = siblings.map(_.toPath).filter(candidate => keyOf(candidate) == keyOf(path))
+    group(if (same.isEmpty) List(path) else same).headOption.getOrElse(of(path))
+  }
+
   private def keyOf(path: Path): String = {
     val directory = Option(path.getParent).map(_.toString).getOrElse("")
     s"$directory/${baseNameOf(path).toLowerCase}"

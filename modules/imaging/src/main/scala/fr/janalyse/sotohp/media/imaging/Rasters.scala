@@ -267,6 +267,60 @@ object Rasters {
       (high - low + 1).toDouble
     }
 
+    /** The largest connected group of lit pixels, as a mask of its own.
+      *
+      * What tells a subject apart from everything else that happens to be bright is that it holds
+      * together : a threshold high enough to isolate the sun in a landscape also catches a
+      * reflection here and a hot pixel there, and they are not the subject. Neighbourhood is taken
+      * as the eight surrounding pixels, so that a thin diagonal edge stays one piece.
+      */
+    def largestGroup: Option[BitMask] = {
+      if (count == 0) None
+      else {
+        val visited = Array.ofDim[Boolean](flags.length)
+        val stack   = scala.collection.mutable.ArrayBuffer.empty[Int]
+        val group   = scala.collection.mutable.ArrayBuffer.empty[Int]
+        var best    = Array.emptyIntArray
+        var start   = 0
+        while (start < flags.length) {
+          if (flags(start) && !visited(start)) {
+            group.clear()
+            stack.clear()
+            stack += start
+            visited(start) = true
+            while (stack.nonEmpty) {
+              val index = stack.remove(stack.length - 1)
+              group += index
+              val x     = index % width
+              val y     = index / width
+              var dy    = -1
+              while (dy <= 1) {
+                var dx = -1
+                while (dx <= 1) {
+                  val nextX = x + dx
+                  val nextY = y + dy
+                  if (nextX >= 0 && nextY >= 0 && nextX < width && nextY < height) {
+                    val next = nextY * width + nextX
+                    if (flags(next) && !visited(next)) { visited(next) = true; stack += next }
+                  }
+                  dx += 1
+                }
+                dy += 1
+              }
+            }
+            if (group.length > best.length) best = group.toArray
+          }
+          start += 1
+        }
+        if (best.isEmpty) None
+        else {
+          val kept = Array.ofDim[Boolean](flags.length)
+          best.foreach(index => kept(index) = true)
+          Some(BitMask(width, height, kept, best.length))
+        }
+      }
+    }
+
     /** Center of gravity of the mask, beware : for a crescent shape this is NOT the disc center */
     def centroid: Option[(Double, Double)] = {
       var totalX = 0d

@@ -173,6 +173,54 @@ valeurs par défaut brutes.
 | `--blend` | `lighten` par défaut : sur ciel noir, les bords de vignettes deviennent invisibles |
 | `--no-sky-fix`, `--no-color-fix`, `--no-brightness-fix` | désactivent les corrections automatiques |
 
+### Le paysage en fond
+
+Un téléobjectif ne dit rien du lieu : chaque vue est un disque sur du noir, et le composite
+les place par le calcul seul. Une **photo grand angle du même ciel, prise du même endroit**,
+rapporte tout ce que le 200 mm ne pouvait pas tenir — l'horizon, les arbres, la plaine, la
+couleur de l'air — et il suffit de la placer une fois pour que toute la géométrie suive.
+
+```bash
+sbt "cli/run compose measurements.csv --background IMG_3794.JPG --out composite.png"
+make compose-landscape BACKGROUND=IMG_3794.JPG
+```
+
+Elle se place **par son propre soleil** : l'éphéméride dit où le soleil était à cet
+instant-là, la photo dit où il est tombé sur le capteur, et les deux ensemble fixent la
+direction de visée. Rien d'autre n'est demandé — l'échelle vient de la focale et du pas du
+capteur lus dans les EXIF, le roulis est nul pour un boîtier tenu de niveau. Le résultat est
+vérifiable à l'œil : le programme annonce **à quelle ligne de la photo passe l'horizon vrai**,
+et le sol doit commencer juste en dessous.
+
+| option | rôle |
+|---|---|
+| `--background <fichier>` | la photo grand angle qui sert de décor |
+| `--background-margin <°>` | ciel gardé autour de la séquence pour la montrer (4° par défaut) |
+| `--background-brightness <0..1>` | l'assombrit, pour que les soleils restent le sujet |
+| `--background-roll <°>` | roulis du boîtier, positif quand son horizon descend vers la droite |
+| `--background-sun <x,y>` | où est le soleil dessus, s'il ne se trouve pas tout seul |
+| `--background-scale <px/°>` | son échelle, si les EXIF ne donnent pas l'optique |
+
+Trois détails qui comptent :
+
+- **le second boîtier n'a ni GPS ni bonne heure.** La position vient de la séance — l'appareil
+  n'a pas bougé — et une horloge restée sur un autre fuseau est remise d'aplomb par **heures
+  entières** : c'est la seule erreur qu'un fuseau sache faire, et deux faits la tranchent, le
+  soleil est visible sur la photo donc il était au-dessus de l'horizon, et la photo appartient
+  à la séance donc elle a été prise autour ;
+- **le soleil s'y trouve par sa forme, pas par sa moyenne.** Sur un paysage, il fait quarante
+  pixels sur vingt-quatre millions : on prend le plus gros groupe connexe de pixels proches du
+  maximum, et son **cadre englobant**, car le barycentre d'un croissant a déjà quitté le centre
+  du disque ;
+- **les deux images ne sont pas d'équerre.** Passer de la géométrie d'une vue rectilinéaire à
+  celle d'une autre est *exactement* une homographie 3×3 — deux projections centrales de la
+  même sphère — donc neuf multiplications par pixel, sans trigonométrie et sans approximation.
+  Le canevas ne grandit que jusqu'au rectangle **inscrit** dans ce que le décor couvre, sinon
+  un coin noir apparaîtrait le long du bord.
+
+Si la séquence monte plus haut que le décor, c'est dit, et ce morceau de ciel reste noir :
+une vue n'est jamais jetée parce que le paysage s'arrêtait plus bas.
+
 ---
 
 ## Les points délicats, et comment ils sont traités

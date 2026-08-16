@@ -1,6 +1,6 @@
 package fr.janalyse.eclipse.composer
 
-import fr.janalyse.eclipse.astro.TangentPlaneProjection
+import fr.janalyse.eclipse.astro.{SkyFrame, TangentPlaneProjection}
 import fr.janalyse.eclipse.model.{FrameAnalysis, FramePhase, HorizontalCoordinates}
 import fr.janalyse.sotohp.media.imaging.LinearAlgebra
 
@@ -32,6 +32,14 @@ sealed trait CompositeLayout {
   def name: String
   def place(frames: Seq[FrameAnalysis], config: LayoutConfig): Vector[Placement]
 
+  /** The virtual camera the frames are laid out through, when the layout has one.
+    *
+    * Only a layout which reproduces the real sky has one, and it is what anything else drawn in that
+    * same sky - a wide angle background, a horizon, a star chart - has to be placed through. A
+    * contact sheet has no such thing : its geometry is the page, not the sky.
+    */
+  def skyFrame(frames: Seq[FrameAnalysis]): Option[SkyFrame] = None
+
   protected def discRadiusPixels(frame: FrameAnalysis, config: LayoutConfig): Double =
     frame.sun.map(_.semiDiameterDegrees).getOrElse(0.266d) * config.pixelsPerDegree
 
@@ -59,6 +67,11 @@ final case class SkyPathLayout(
   center: Option[HorizontalCoordinates] = None
 ) extends CompositeLayout {
   val name = "sky-path"
+
+  override def skyFrame(frames: Seq[FrameAnalysis]): Option[SkyFrame] = {
+    val positions = frames.flatMap(_.position)
+    Option.when(positions.nonEmpty)(SkyFrame(center.getOrElse(TangentPlaneProjection.meanDirection(positions))))
+  }
 
   def place(frames: Seq[FrameAnalysis], config: LayoutConfig): Vector[Placement] = {
     val positions  = frames.flatMap(_.position)
